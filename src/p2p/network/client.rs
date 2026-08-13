@@ -638,4 +638,79 @@ mod tests {
         let result = client.cat_bytes("invalid_hash").await;
         assert!(result.is_err());
     }
+
+    /// The configuration's promise is kept: a node whose `ClientConfig` switched
+    /// global discovery off binds an endpoint that speaks to no service outside
+    /// this host.
+    ///
+    /// Written against the BOUND ENDPOINT and not against the builder, because a
+    /// `Builder` offers no introspection. Two assertions, and the second is the one
+    /// that carries the gate:
+    ///
+    /// 1. The address holds IP transports only. An endpoint built from
+    ///    `presets::Minimal` carries no relay transport AT ALL —
+    ///    `Builder::relay_mode` is what inserts one and `Minimal::apply` never calls
+    ///    it — so a `TransportAddr::Relay` can never appear here. Necessary but weak
+    ///    on its own: `Endpoint::addr`'s own doc says the relay lands in the address
+    ///    only after the endpoint went online, so an N0 endpoint would pass this line
+    ///    too if the test ran fast enough.
+    /// 2. `Endpoint::online()` does not return. It waits for a connection to a home
+    ///    relay, and without a relay transport there is no home relay to reach — so
+    ///    the timeout below is not a race, it is the shape of the thing. An N0
+    ///    endpoint reaches one within seconds.
+    ///
+    /// The N0 direction is deliberately NOT asserted in a test of its own: binding
+    /// `production()` here would publish this host to n0.computer on every
+    /// `cargo test`. What pins that half is `production_still_asks_for_both_lookup_services`
+    /// below plus the one-time measurement in Plan 21 Task 2 Step 0, where this very
+    /// test was run RED against the unpatched `initialize_node`.
+    #[tokio::test]
+    async fn a_discovery_free_configuration_binds_an_endpoint_with_no_outside_service() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut config = ClientConfig::testing();
+        config.data_store_path = Some(format!("./tmp/test_discovery_off_{}", timestamp).into());
+        assert!(!config.enable_discovery_n0, "testing() asks for no n0 lookup");
+        assert!(!config.enable_discovery_mdns, "testing() asks for no mDNS");
+
+        let client = IrohClient::new(config).await.unwrap();
+        let endpoint = client.backend().get_endpoint().await.unwrap();
+        let endpoint = endpoint.read().await;
+        let endpoint = endpoint.as_ref().expect("the endpoint bound");
+
+        let addr = endpoint.addr();
+        assert!(
+            addr.addrs.iter().all(|a| a.is_ip()),
+            "a configuration with both discovery flags off binds no relay transport, \
+             but the address carries: {:?}",
+            addr.addrs
+        );
+
+        let online = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            endpoint.online(),
+        )
+        .await;
+        assert!(
+            online.is_err(),
+            "a configuration with global discovery off reached a home relay — \
+             `initialize_node` is not reading `enable_discovery_n0`"
+        );
+    }
+
+    /// The PRODUCTION half of the same rule, and it is a value test on purpose.
+    ///
+    /// `production()` is what a real deployment runs, and binding it in a unit test
+    /// would publish this host to n0.computer on every `cargo test`. So what is
+    /// pinned here is the CONTRACT `initialize_node` reads — both flags set — and the
+    /// branch that reads it is pinned by the test above falling before the patch and
+    /// passing after it.
+    #[test]
+    fn production_still_asks_for_both_lookup_services() {
+        let config = ClientConfig::production();
+        assert!(config.enable_discovery_n0, "production keeps global discovery");
+        assert!(config.enable_discovery_mdns, "production keeps local discovery");
+    }
 }

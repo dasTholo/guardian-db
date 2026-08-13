@@ -567,25 +567,57 @@ impl IrohBackend {
             *store_lock = Some(StoreType::Fs(fs_store));
         }
 
-        // Initialize the Endpoint for P2P communication with native address lookup services.
-        // Iroh 1.0 uses the N0 preset, which enables DNS + Pkarr discovery via n0.computer (global).
-        // Local mDNS discovery (LAN) is added after binding via iroh-mdns-address-lookup.
-        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+        // The endpoint for P2P communication — and WHICH address lookup services it
+        // gets is the configuration's decision, not this function's.
+        //
+        // `enable_discovery_n0` and `enable_discovery_mdns` were DEAD until now:
+        // `testing()` and `offline()` set both to `false`, `development()` one of
+        // them, and this function built `presets::N0` plus mDNS regardless. A
+        // configuration flag no code reads is worse than no flag — it promises a
+        // closed deployment and delivers a node that publishes to and queries
+        // n0.computer on every start.
+        //
+        // `presets::N0` is `presets::Minimal` plus a `PkarrPublisher`, a
+        // `PkarrResolver`, a `DnsAddressLookup` (all against n0.computer) and the n0
+        // relay mode (iroh 1.0.3, `endpoint/presets.rs`). `Minimal` sets the mandatory
+        // crypto provider and nothing else.
+        //
+        // THE RELAY GOES WITH THEM, and that is deliberate rather than incidental: a
+        // relay is the second global n0 service an endpoint contacts at start, and a
+        // deployment that switched global discovery off did not ask for that one
+        // either. What it costs is hole punching between hosts that cannot reach each
+        // other directly — which is exactly the case a closed deployment states its
+        // addresses for.
+        //
+        // Two `builder()` calls and not one: `Endpoint::builder` takes `impl Preset`
+        // and returns a plain `Builder`, so the two presets are two arguments and
+        // never one value.
+        let builder = if self.config.enable_discovery_n0 {
+            Endpoint::builder(iroh::endpoint::presets::N0)
+        } else {
+            Endpoint::builder(iroh::endpoint::presets::Minimal)
+        };
+        let endpoint = builder
             .secret_key(self.secret_key.clone())
             .bind()
             .await
             .map_err(|e| GuardianError::Other(format!("Error initializing Endpoint: {}", e)))?;
 
-        // mDNS discovery on the local network (LAN), equivalent to the former discovery_local_network().
-        match MdnsAddressLookup::builder().build(endpoint.id()) {
-            Ok(mdns) => match endpoint.address_lookup() {
-                Ok(services) => {
-                    services.add(mdns);
-                    debug!("Local mDNS discovery (LAN) enabled");
-                }
-                Err(e) => warn!("Address lookup unavailable for mDNS: {}", e),
-            },
-            Err(e) => warn!("Could not start local mDNS discovery: {}", e),
+        // mDNS on the local network (LAN), when the configuration asks for it. The
+        // same rule as above, and the same reason: `enable_discovery_mdns` decides.
+        if self.config.enable_discovery_mdns {
+            match MdnsAddressLookup::builder().build(endpoint.id()) {
+                Ok(mdns) => match endpoint.address_lookup() {
+                    Ok(services) => {
+                        services.add(mdns);
+                        debug!("Local mDNS discovery (LAN) enabled");
+                    }
+                    Err(e) => warn!("Address lookup unavailable for mDNS: {}", e),
+                },
+                Err(e) => warn!("Could not start local mDNS discovery: {}", e),
+            }
+        } else {
+            debug!("Local mDNS discovery (LAN) disabled by configuration");
         }
 
         // Store the endpoint.
@@ -731,10 +763,18 @@ impl IrohBackend {
             status.last_error = None;
         }
 
-        // Discovery is managed automatically by the Endpoint via discovery_n0() and discovery_local_network().
-        // Iroh publishes and discovers peers automatically via PkarrPublisher, DnsDiscovery and MdnsDiscovery.
-        debug!("Iroh's native discovery services enabled on the Endpoint");
-        info!("Iroh backend initialized with active discovery services");
+        // Address lookup follows `ClientConfig`: `enable_discovery_n0` picks the
+        // endpoint preset and `enable_discovery_mdns` decides the LAN lookup
+        // (`initialize_node` above). A node built from `testing()` resolves
+        // nothing and must be handed addresses — see `Endpoint::add_node_addr`.
+        if self.config.has_discovery_enabled() {
+            info!(
+                "Iroh backend initialized; address lookup: n0={} mdns={}",
+                self.config.enable_discovery_n0, self.config.enable_discovery_mdns
+            );
+        } else {
+            info!("Iroh backend initialized with NO address lookup — peers must be stated by address");
+        }
         Ok(())
     }
 
