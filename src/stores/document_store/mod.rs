@@ -79,6 +79,29 @@ impl DocumentStoreIndex {
         guard.clear();
     }
 
+    /// Replace the whole map in ONE write.
+    ///
+    /// The reason it exists is that `clear_all` + refill is visible from
+    /// the OUTSIDE as an empty index: between the clear and the last
+    /// insert every reader sees a map that is missing keys it saw a
+    /// moment ago, and for the duration of the first content fetch it
+    /// sees nothing at all.
+    ///
+    /// LOCK LOAD GOES DOWN, not up, and it is worth saying because the
+    /// opposite is the natural guess: this holds the write lock for a
+    /// `HashMap` move where `clear_all` held it for a `clear` — both O(1)
+    /// against the map size — while the REBUILD now runs outside any
+    /// lock, where it used to take one per `insert`.
+    ///
+    /// The price is memory: the old map and the new one stand side by
+    /// side while the rebuild runs. That is exactly what buys a
+    /// continuously readable index, and it is the deliberate difference
+    /// to `clear_all`.
+    pub fn replace_all(&self, next: HashMap<String, Vec<u8>>) {
+        let mut guard = self.index.write();
+        *guard = next;
+    }
+
     pub fn len(&self) -> usize {
         let guard = self.index.read();
         guard.len()
@@ -92,6 +115,14 @@ impl DocumentStoreIndex {
 
 /// Rebuilds the in-memory index from the current state of the iroh-docs document.
 /// Shared between `sync_index_from_docs` and the reactive live-sync task.
+///
+/// THE MAP IS SWAPPED, NOT CLEARED (`LI M1`). This used to call
+/// `index.clear_all()` before the loop and refill entry by entry, with
+/// one `await` per entry — so between the clear and the last insert the
+/// index was incomplete, and for the duration of the first content fetch
+/// it was EMPTY. Since the live-sync task below runs this on every remote
+/// event, a key that had long been visible could disappear again at any
+/// moment, and every reader polling the index saw that window.
 async fn refresh_doc_index(
     docs: &WillowDocs,
     doc: &Doc,
@@ -102,20 +133,60 @@ async fn refresh_doc_index(
         .get_many(doc, Query::single_latest_per_key().build())
         .await?;
 
-    index.clear_all();
+    // Entries with `content_len == 0` are deletion markers and are
+    // skipped here rather than inside the loop — the filter moved with
+    // the loop, it did not change.
+    let keys: Vec<(String, String)> = entries
+        .iter()
+        .filter(|entry| entry.content_len() != 0)
+        .map(|entry| {
+            (
+                String::from_utf8_lossy(entry.key()).to_string(),
+                entry.content_hash().to_hex().to_string(),
+            )
+        })
+        .collect();
+
+    let count = rebuild_from(index, keys, |hash| {
+        let client = Arc::clone(client);
+        async move { client.cat_bytes(&hash).await }
+    })
+    .await;
+
+    debug!(
+        "DocumentStore index synchronized from iroh-docs: {} entries",
+        count
+    );
+    Ok(count)
+}
+
+/// Build the next map from `keys` and install it in ONE write.
+///
+/// SPLIT FROM ITS SOURCE so a test can hold it mid-flight: production
+/// passes `client.cat_bytes`, `LI T2` passes a fetch that blocks on a
+/// channel after the first entry and reads the index while the rebuild
+/// stands still there. This is the only structural change the repair
+/// makes, it changes no caller, and whoever folds it back into
+/// `refresh_doc_index` loses `T2` — which is a decision, then, and not
+/// an accident.
+///
+/// The map is built OUTSIDE the lock and installed with `replace_all`,
+/// which is the whole repair.
+async fn rebuild_from<F, Fut>(
+    index: &Arc<DocumentStoreIndex>,
+    keys: Vec<(String, String)>,
+    fetch: F,
+) -> usize
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>>>,
+{
+    let mut next = HashMap::with_capacity(keys.len());
     let mut count = 0;
-
-    for entry in &entries {
-        let key = String::from_utf8_lossy(entry.key()).to_string();
-
-        if entry.content_len() == 0 {
-            continue;
-        }
-
-        let hash_str = entry.content_hash().to_hex();
-        match client.cat_bytes(&hash_str).await {
+    for (key, hash) in keys {
+        match fetch(hash).await {
             Ok(value) => {
-                index.insert(key, value);
+                next.insert(key, value);
                 count += 1;
             }
             Err(e) => {
@@ -123,12 +194,8 @@ async fn refresh_doc_index(
             }
         }
     }
-
-    debug!(
-        "DocumentStore index synchronized from iroh-docs: {} entries",
-        count
-    );
-    Ok(count)
+    index.replace_all(next);
+    count
 }
 
 impl StoreIndex for DocumentStoreIndex {
@@ -510,8 +577,20 @@ impl GuardianDBDocumentStore {
             use futures::StreamExt;
             use iroh_docs::engine::LiveEvent;
             while let Some(event) = stream.next().await {
-                // Rebuild the index ONLY on REMOTE-origin events (peer sync),
-                // avoiding a race with local writes (which already update the index directly).
+                // Rebuild the index ONLY on REMOTE-origin events (peer sync).
+                // Local writes update the index directly (`put_impl`), so
+                // rebuilding on them would be pure waste.
+                //
+                // THIS DOES NOT AVOID THE RACE WITH A LOCAL WRITE, and the
+                // line here used to claim it did. A remote event can arrive
+                // between a local write and the read that follows it, and the
+                // rebuild then overwrites the local key with whatever the
+                // document holds. `replace_all` changed the READER's view —
+                // no reader sees a gap any more — and it left that race
+                // exactly where it was. Closing it needs a generation counter
+                // at `put_impl`/`del` or a rebuild lock; both were on the
+                // table for `LI` and both were declined as a second,
+                // separate decision (`LI §0.5`, `§7`).
                 let is_remote = matches!(
                     event,
                     Ok(LiveEvent::InsertRemote { .. })
@@ -1287,5 +1366,113 @@ pub fn default_store_opts_for_map(key_field: &str) -> CreateDocumentDBOptions {
         key_extractor: Arc::new(map_key_extractor(key_field.to_string())),
 
         item_factory: Arc::new(|| Value::Object(Map::new())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hand_built_clear_and_refill_loses_a_visible_key_the_swap_never_does() {
+        // TWO HALVES IN ONE FUNCTION, so no fixture difference carries the
+        // statement: the same index type, the same key, the same value —
+        // only the way the map is replaced moves.
+        //
+        // The first half is the state the OLD path produces, built by
+        // hand. It is not a test of dead code: it is what names that
+        // state instead of describing it, and it is what stays behind as
+        // the red proof once the production path stops producing it
+        // (`LI §4 P3`).
+        let index = Arc::new(DocumentStoreIndex::new());
+        index.insert("k".to_string(), b"VISIBLE".to_vec());
+        assert_eq!(index.get_value("k"), Some(b"VISIBLE".to_vec()));
+
+        // HAND-BUILT, the old way: clear first, refill after.
+        index.clear_all();
+        assert_eq!(
+            index.get_value("k"),
+            None,
+            "between the clear and the refill a key that WAS visible is gone \
+             — and every reader polling the index sees exactly this"
+        );
+        index.insert("k".to_string(), b"VISIBLE".to_vec());
+
+        // THE PRODUCTION WAY: one write, and the key never leaves.
+        let mut next = HashMap::new();
+        next.insert("k".to_string(), b"REBUILT".to_vec());
+        index.replace_all(next);
+        assert_eq!(
+            index.get_value("k"),
+            Some(b"REBUILT".to_vec()),
+            "the swap is atomic against a reader: old value or new value, \
+             never nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_stays_readable_while_the_rebuild_is_held_mid_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // DETERMINISTIC, and that is the whole design of this gate: the
+        // test controls the ORDER through a channel, so there is no
+        // timing race and no "at N large enough it falls over". The
+        // rebuild stops between entry 1 and entry 2 because the test says
+        // so, and the reading happens while it stands there.
+        let index = Arc::new(DocumentStoreIndex::new());
+        index.insert("a".to_string(), b"OLD-A".to_vec());
+        index.insert("b".to_string(), b"OLD-B".to_vec());
+
+        let (reached_tx, mut reached_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let release = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let fetch = move |hash: String| {
+            let reached_tx = reached_tx.clone();
+            let release = Arc::clone(&release);
+            let calls = Arc::clone(&calls);
+            async move {
+                // The SECOND entry: the first is already in the next map,
+                // so the rebuild is genuinely mid-flight when it stops.
+                if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    reached_tx.send(()).await.unwrap();
+                    let rx = release.lock().await.take().unwrap();
+                    rx.await.unwrap();
+                }
+                Ok(format!("NEW-{hash}").into_bytes())
+            }
+        };
+
+        let index_for_task = Arc::clone(&index);
+        let task = tokio::spawn(async move {
+            rebuild_from(
+                &index_for_task,
+                vec![
+                    ("a".to_string(), "a".to_string()),
+                    ("b".to_string(), "b".to_string()),
+                ],
+                fetch,
+            )
+            .await
+        });
+
+        reached_rx.recv().await.unwrap();
+
+        // THE MEASUREMENT. The rebuild stands between its two entries.
+        // Against the OLD form — `clear_all` before the loop — both of
+        // these would be `None`, and a reader polling here would see an
+        // index that had lost two keys it saw a moment ago.
+        assert_eq!(
+            index.get_value("a"),
+            Some(b"OLD-A".to_vec()),
+            "held mid-flight, the index still answers the COMPLETE old state"
+        );
+        assert_eq!(index.get_value("b"), Some(b"OLD-B".to_vec()));
+
+        release_tx.send(()).unwrap();
+        assert_eq!(task.await.unwrap(), 2, "both entries were fetched");
+        assert_eq!(index.get_value("a"), Some(b"NEW-a".to_vec()));
+        assert_eq!(index.get_value("b"), Some(b"NEW-b".to_vec()));
     }
 }
