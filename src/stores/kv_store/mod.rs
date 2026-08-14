@@ -121,13 +121,26 @@ impl KeyValueIndex {
 /// Function shared between `sync_index_from_docs` (manual load/sync) and the reactive
 /// live-sync task, avoiding logic duplication.
 ///
-/// THE MAP IS SWAPPED, NOT CLEARED (`LI M1`). This used to call
-/// `index.clear_all()` before the loop and refill entry by entry, with
-/// one `await` per entry — so between the clear and the last insert the
-/// index was incomplete, and for the duration of the first content fetch
-/// it was EMPTY. Since the live-sync task below runs this on every remote
-/// event, a key that had long been visible could disappear again at any
-/// moment, and every reader polling the index saw that window.
+/// IT CLEARS AND REFILLS, and that is a MEASURED decision rather than the
+/// state nobody got round to changing. `LI` swapped this loop for
+/// [`rebuild_from`] + [`KeyValueIndex::replace_all`], which removes the
+/// window in which this index is empty, and then measured three blocks of
+/// 60 suite runs at two gitlinks under one compiler: the swap raised the
+/// loss rate from 10/60 to 28/60, deadline losses from 5/60 to 17/60
+/// (Fisher exact two-sided over the pooled point, p = 0.00072), and an
+/// A-B-A repeat at the first point reproduced 5/60 hours later. The
+/// suspicion that the host had drifted is refuted by that order:
+/// low-high-low.
+///
+/// THE HYPOTHESIS is written out in full at the twin of this function in
+/// `document_store`, and it holds here word for word: this form makes
+/// each key visible the moment its own `cat_bytes` returns, so a reader
+/// waiting on one key can finish mid-rebuild, while the swap makes NO key
+/// visible until the WHOLE rebuild is done — and the live-sync task below
+/// rebuilds on every remote event. The empty window is real — `LI T1`,
+/// `T2` and `T3` hold it down — but trading it for a later-and-all-at-once
+/// window measured worse. Whoever tries again should measure before
+/// wiring it up: no gate here covers the CALLER, only the building block.
 async fn refresh_kv_index(
     docs: &WillowDocs,
     doc: &Doc,
@@ -138,25 +151,29 @@ async fn refresh_kv_index(
         .get_many(doc, Query::single_latest_per_key().build())
         .await?;
 
-    // Entries with `content_len == 0` are deletion markers and are
-    // skipped here rather than inside the loop — the filter moved with
-    // the loop, it did not change.
-    let keys: Vec<(String, String)> = entries
-        .iter()
-        .filter(|entry| entry.content_len() != 0)
-        .map(|entry| {
-            (
-                String::from_utf8_lossy(entry.key()).to_string(),
-                entry.content_hash().to_hex().to_string(),
-            )
-        })
-        .collect();
+    index.clear_all();
+    let mut count = 0;
 
-    let count = rebuild_from(index, keys, |hash| {
-        let client = Arc::clone(client);
-        async move { client.cat_bytes(&hash).await }
-    })
-    .await;
+    for entry in &entries {
+        let key = String::from_utf8_lossy(entry.key()).to_string();
+
+        // Entries with content_len == 0 are deletion markers.
+        if entry.content_len() == 0 {
+            continue;
+        }
+
+        // Read the content bytes via the blob store using the content_hash.
+        let hash_str = entry.content_hash().to_hex();
+        match client.cat_bytes(&hash_str).await {
+            Ok(value) => {
+                index.insert(key, value);
+                count += 1;
+            }
+            Err(e) => {
+                warn!("Failed to read content for key from iroh-docs: {:?}", e);
+            }
+        }
+    }
 
     debug!(
         "KeyValue index synchronized from iroh-docs: {} entries",
@@ -166,6 +183,19 @@ async fn refresh_kv_index(
 }
 
 /// The `document_store` twin of this function carries the argument in full.
+//
+// NO PRODUCTION CALLER any more, and it stays anyway. `refresh_kv_index`
+// above went back to clear-and-refill because the swap measured worse, so
+// the twin's argument describes the path `LI` built and the measurement
+// then took away — read it as the starting point of a second attempt, not
+// as a description of what this tree runs.
+//
+// IT STAYS because it is the building block `LI T2` stands on: that gate
+// can hold a rebuild mid-flight only because the fetch is a parameter
+// here. Delete this and `T2` goes with it, and whoever next tries to
+// close the empty window starts from zero instead of from a block that
+// already has a test around it.
+#[allow(dead_code)]
 async fn rebuild_from<F, Fut>(
     index: &Arc<KeyValueIndex>,
     keys: Vec<(String, String)>,
@@ -730,12 +760,10 @@ impl GuardianDBKeyValue {
                 // line here used to claim it did. A remote event can arrive
                 // between a local write and the read that follows it, and the
                 // rebuild then overwrites the local key with whatever the
-                // document holds. `replace_all` changed the READER's view —
-                // no reader sees a gap any more — and it left that race
-                // exactly where it was. Closing it needs a generation counter
-                // at `put_impl`/`del` or a rebuild lock; both were on the
-                // table for `LI` and both were declined as a second,
-                // separate decision (`LI §0.5`, `§7`).
+                // document holds. Closing that needs a generation counter at
+                // `put_impl`/`del` or a rebuild lock; both were on the table
+                // for `LI` and both were declined as a second, separate
+                // decision (`LI §0.5`, `§7`).
                 let is_remote = matches!(
                     event,
                     Ok(LiveEvent::InsertRemote { .. })
