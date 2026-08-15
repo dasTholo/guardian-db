@@ -9,6 +9,8 @@
 use guardian_db::p2p::network::client::IrohClient;
 use guardian_db::p2p::network::config::ClientConfig;
 use guardian_db::p2p::network::core::docs::WillowDocs;
+use iroh_blobs::Hash;
+use iroh_docs::DocTicket;
 use iroh_docs::store::Query;
 use tempfile::TempDir;
 mod common;
@@ -123,5 +125,112 @@ async fn scan_docs_reads_the_doc_where_query_reads_an_index_that_was_just_cleare
         1,
         "the doc path answers the SAME document, because the document never \
          lost it"
+    );
+}
+
+/// `AS L4` — the gate the constraint went without: `scan_docs` ABORTS on an
+/// entry that the index build only warns about and steps over.
+///
+/// WHICH BRANCH THIS HOLDS, and which it does not. `scan_docs` can fail on a
+/// single entry in three places, in this order: the blob fetch (`cat_bytes`),
+/// the payload codec (`decode_value`), and the JSON parse. This test holds the
+/// FIRST, and it holds that one because it is the branch the constraint is
+/// worded around: `refresh_doc_index` has exactly ONE `warn!`-and-skip and it
+/// sits on the very same `cat_bytes`, so both paths can be pointed at ONE
+/// entry in ONE document and nothing moves between them but the method asked.
+///
+/// THE OTHER TWO STAY UNGATED, and this says so rather than letting the name
+/// imply otherwise. `decode_value` cannot fail under the identity codec every
+/// store in this file runs on, and handing this store a real codec would take
+/// the contrast away with it: the wrapper's `query` feeds index bytes straight
+/// to `serde_json` without ever asking the codec, so over an encoded index it
+/// answers nothing at all and the "and it still answers" half of the statement
+/// collapses. An honest hole is worth more than a test whose name outruns what
+/// it measures.
+#[tokio::test]
+async fn scan_docs_fails_on_the_entry_the_index_build_only_warns_about() {
+    let node = TestNode::new("scan-docs-unfetchable").await.unwrap();
+    let docs = node.db.docs("scan-docs-unfetchable", None).await.unwrap();
+
+    docs.put(Box::new(json!({ "_id": "rev/de/aaa", "name": "Alice" })))
+        .await
+        .unwrap();
+
+    // Green first, so every failure below is a change and not the state the
+    // fixture started in.
+    assert_eq!(
+        docs.scan_docs("rev/de/").await.unwrap().len(),
+        1,
+        "the prefix selects the one header that is there and readable"
+    );
+
+    // THE UNREADABLE ENTRY, by hand. The store's own iroh-docs document is
+    // reachable through the ticket it hands out, and a `WillowDocs` over the
+    // same backend is the same engine — so this writes into the very document
+    // the store reads, and not into a lookalike.
+    let ticket = docs
+        .share_ticket()
+        .await
+        .unwrap()
+        .parse::<DocTicket>()
+        .unwrap();
+    let mut willow = WillowDocs::new(node.iroh.backend().clone()).await.unwrap();
+    let author = willow.get_or_init_author().await.unwrap();
+    let doc = willow
+        .open_doc(ticket.capability.id())
+        .await
+        .unwrap()
+        .expect("the store's own document, opened a second time");
+
+    // `set_hash` and not `set_bytes`: it writes the ENTRY and leaves the blob
+    // behind it absent, which is the state a peer's entry is in between the
+    // sync that carried the key and the transfer that carries its content.
+    // That is the case `refresh_doc_index` keeps its `warn!` for, built here
+    // as a state and not as a race. The size is non-zero on purpose: a
+    // zero-length entry is a deletion marker, which both paths skip by design.
+    let never_stored = b"a payload this node was never sent";
+    doc.set_hash(
+        author,
+        b"rev/de/ghost".to_vec(),
+        Hash::new(never_stored),
+        never_stored.len() as u64,
+    )
+    .await
+    .unwrap();
+
+    // THE TWO PATHS SIDE BY SIDE over that one entry.
+    assert!(
+        docs.scan_docs("rev/de/").await.is_err(),
+        "scan_docs must FAIL on an entry it cannot fetch: a skipped entry \
+         would be an invisible ancestor, and that is the same fork this read \
+         exists to prevent, only quieter (`AS L4`)"
+    );
+
+    // `Store::load` IS `sync_index_from_docs`, which is `refresh_doc_index`:
+    // the index build walks the same two entries and does not fail over the
+    // second one.
+    docs.load(0)
+        .await
+        .expect("the index build steps over the entry that stopped scan_docs");
+
+    // The long form the fork's own suite uses
+    // (`tests/integration_persistence.rs:235-244`): the closure's return
+    // type does not infer through `Pin<Box<dyn Future<…>>>` on its own.
+    let filter: AsyncDocumentFilter = Box::pin(|_doc| {
+        Box::pin(async move { Ok(true) })
+            as std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<bool, Box<dyn std::error::Error + Send + Sync>>,
+                        > + Send,
+                >,
+            >
+    });
+    assert_eq!(
+        docs.query(filter).await.unwrap().len(),
+        1,
+        "and the index path keeps answering afterwards — with the entry it \
+         could read and without the one it could not, which is exactly the \
+         leniency scan_docs refuses"
     );
 }
