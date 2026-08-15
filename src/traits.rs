@@ -789,6 +789,21 @@ pub trait DocumentStore: Store {
 
     /// Finds documents using a filter function (predicate).
     async fn query(&self, filter: AsyncDocumentFilter) -> Result<Vec<Document>, Self::Error>;
+
+    /// Every document under `prefix`, read from the store's own iroh-docs
+    /// document rather than from the index over it.
+    ///
+    /// [`Self::query`] answers out of that index, which the live-sync task
+    /// clears and rebuilds on every remote event — for the span of one
+    /// `cat_bytes` it answers `Ok(vec![])` for keys that are in fact there. A
+    /// caller that cannot tell "the index is mid-rebuild" from "nothing is
+    /// there" reads HERE. A lineage read is exactly that caller: an empty
+    /// answer and a fresh coordinate are indistinguishable to it.
+    ///
+    /// A SECOND read path and not a replacement. `query` keeps its cache, its
+    /// cost and its callers; this one touches the index in neither direction —
+    /// it does not read it and it does not fill it.
+    async fn scan_docs(&self, prefix: &str) -> Result<Vec<Document>, Self::Error>;
     /// Generates a (serialized) `DocTicket` that grants a peer access to synchronize this store.
     ///
     /// Replication capability: the peer must open the store passing the ticket in

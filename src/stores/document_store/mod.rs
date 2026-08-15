@@ -1273,6 +1273,60 @@ impl GuardianDBDocumentStore {
         Ok(results)
     }
 
+    /// Every document under `prefix`, read from the iroh-docs document itself.
+    ///
+    /// The trait method of the same name, on the concrete store — see
+    /// `crate::traits::DocumentStore::scan_docs` for what it is FOR. What is
+    /// worth saying here is how it differs from its two neighbours:
+    ///
+    /// - against [`Self::query`]: it never looks at `self.index`, so a rebuild
+    ///   running beside it cannot empty its answer;
+    /// - against [`refresh_doc_index`]: an entry it cannot fetch or decode is an
+    ///   ERROR and not a `warn!` and a skip. For a cache a dropped entry is a
+    ///   miss the next read repairs; for a lineage it is an invisible ancestor,
+    ///   which is the same fork this whole path exists to prevent — only quieter.
+    ///   Same line as `an_unreadable_peer_makes_list_fail_instead_of_shortening_it`.
+    ///
+    /// An entry with `content_len() == 0` is skipped all the same: that is a
+    /// deletion marker and not an unreadable entry, and the two are not the same
+    /// thing.
+    pub async fn scan_docs(&self, prefix: &str) -> Result<Vec<Document>> {
+        let _entered = self.span.enter();
+
+        // `key_prefix` on the SingleLatestPerKey builder and not the other way
+        // round: `Query::key_prefix` yields a `QueryBuilder<FlatQuery>`, which has
+        // no `single_latest_per_key`. The vendor's own note says the key filter is
+        // applied BEFORE the grouping, which is the order this read wants.
+        let entries = self
+            .docs
+            .get_many(
+                &self.doc_handle,
+                Query::single_latest_per_key().key_prefix(prefix).build(),
+            )
+            .await?;
+
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            if entry.content_len() == 0 {
+                continue;
+            }
+            let key = String::from_utf8_lossy(entry.key()).to_string();
+            let hash_str = entry.content_hash().to_hex();
+            let stored = self.client.cat_bytes(&hash_str).await?;
+            let plaintext = self.decode_value(&key, stored)?;
+            let document: Document = serde_json::from_slice(&plaintext).map_err(|e| {
+                GuardianError::Serialization(format!(
+                    "Could not deserialize the document under '{}': {}",
+                    key, e
+                ))
+            })?;
+            out.push(document);
+        }
+
+        debug!("SCAN prefix='{}' → {} documents via iroh-docs", prefix, out.len());
+        Ok(out)
+    }
+
     pub fn store_type(&self) -> &'static str {
         "document"
     }

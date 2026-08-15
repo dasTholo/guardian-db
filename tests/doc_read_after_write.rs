@@ -11,6 +11,11 @@ use guardian_db::p2p::network::config::ClientConfig;
 use guardian_db::p2p::network::core::docs::WillowDocs;
 use iroh_docs::store::Query;
 use tempfile::TempDir;
+mod common;
+
+use common::TestNode;
+use guardian_db::traits::AsyncDocumentFilter;
+use serde_json::json;
 
 #[tokio::test]
 async fn a_key_written_to_the_doc_is_visible_to_a_prefix_query_at_once() {
@@ -61,5 +66,62 @@ async fn a_key_written_to_the_doc_is_visible_to_a_prefix_query_at_once() {
     assert!(
         entries[0].content_len() > 0,
         "with content behind it, so a reader has a hash to fetch"
+    );
+}
+
+#[tokio::test]
+async fn scan_docs_reads_the_doc_where_query_reads_an_index_that_was_just_cleared() {
+    // THE TWO PATHS SIDE BY SIDE, over one store and one write, so no
+    // fixture difference carries the statement: only WHICH method is asked
+    // moves. The cleared index is not a contrivance — it is the state
+    // `refresh_doc_index` puts this very index into on every remote event,
+    // built by hand here so it is a state and not a race.
+    let node = TestNode::new("scan-docs-node").await.unwrap();
+    let docs = node.db.docs("scan-docs", None).await.unwrap();
+
+    docs.put(Box::new(json!({ "_id": "rev/de/aaa", "name": "Alice" })))
+        .await
+        .unwrap();
+    docs.put(Box::new(json!({ "_id": "payload/de/aaa", "body": "P" })))
+        .await
+        .unwrap();
+
+    // Green first: with the index intact both paths answer, so every zero
+    // below is a change and not the state the fixture started in.
+    assert_eq!(
+        docs.scan_docs("rev/de/").await.unwrap().len(),
+        1,
+        "the prefix selects the one header and leaves the payload key out"
+    );
+
+    // THE WINDOW, by hand.
+    let mut index = docs.index();
+    index.clear().unwrap();
+
+    // The long form the fork's own suite uses
+    // (`tests/integration_persistence.rs:235-244`): the closure's return
+    // type does not infer through `Pin<Box<dyn Future<…>>>` on its own.
+    let filter: AsyncDocumentFilter = Box::pin(|_doc| {
+        Box::pin(async move { Ok(true) })
+            as std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<bool, Box<dyn std::error::Error + Send + Sync>>,
+                        > + Send,
+                >,
+            >
+    });
+    assert_eq!(
+        docs.query(filter).await.unwrap().len(),
+        0,
+        "the index path answers NOTHING while the index is empty — and this \
+         zero is indistinguishable from an empty namespace, which is the \
+         whole defect"
+    );
+    assert_eq!(
+        docs.scan_docs("rev/de/").await.unwrap().len(),
+        1,
+        "the doc path answers the SAME document, because the document never \
+         lost it"
     );
 }

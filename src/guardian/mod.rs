@@ -1486,6 +1486,29 @@ impl DocumentStore for DocumentStoreWrapper {
             .share_ticket()
             .await
     }
+
+    async fn scan_docs(&self, prefix: &str) -> std::result::Result<Vec<Document>, Self::Error> {
+        // The same downcast `share_ticket` makes, and for the same reason: what
+        // this read is DEFINED as — going to the iroh-docs document instead of to
+        // an index — only the concrete store can do. Everything else this wrapper
+        // serves comes out of `Store::index()`, which is precisely the thing being
+        // stepped around here.
+        let values = self
+            .store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "scan_docs: underlying store is not a GuardianDBDocumentStore".to_string(),
+                )
+            })?
+            .scan_docs(prefix)
+            .await?;
+        // `document_store::Document` is `serde_json::Value`, `traits::Document` is
+        // `Box<dyn Any + Send + Sync>` — the same boxing step
+        // `get_all_documents_from_index` makes.
+        Ok(values.into_iter().map(|v| Box::new(v) as Document).collect())
+    }
 }
 
 #[async_trait::async_trait]
