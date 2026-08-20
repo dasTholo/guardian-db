@@ -1962,7 +1962,7 @@ impl BaseStore {
                 Ok(sub) => sub,
                 Err(e) => {
                     // Log error if possible.
-                    eprintln!("Failed to subscribe to EventWrite: {:?}", e);
+                    tracing::warn!("failed to subscribe to EventWrite: {:?}", e);
                     return;
                 }
             };

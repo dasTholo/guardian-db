@@ -687,7 +687,7 @@ impl EventLogStore for EventLogStoreWrapper {
                 Ok(operation) => operations.push(operation),
                 Err(e) => {
                     // Log the error but keep processing other entries.
-                    eprintln!("Warning: Failed to parse entry: {}", e);
+                    tracing::warn!("failed to parse entry: {}", e);
                 }
             }
         }
@@ -1177,50 +1177,32 @@ impl DocumentStoreWrapper {
 
         let all_keys = index.keys().unwrap_or_default();
 
-        eprintln!(
-            "DEBUG: get_all_documents_from_index - Total keys in the index: {}",
-            all_keys.len()
-        );
+        tracing::debug!("total keys in the index: {}", all_keys.len());
 
         for key in all_keys {
-            eprintln!(
-                "DEBUG: get_all_documents_from_index - Processing key: {}",
-                key
-            );
+            tracing::debug!("processing key: {}", key);
             if let Ok(Some(doc_bytes)) = index.get_bytes(&key) {
-                eprintln!(
-                    "DEBUG: get_all_documents_from_index - Bytes retrieved for key '{}': {} bytes",
-                    key,
-                    doc_bytes.len()
-                );
+                tracing::debug!("{} bytes retrieved for key '{}'", doc_bytes.len(), key);
                 match serde_json::from_slice::<serde_json::Value>(&doc_bytes) {
                     Ok(json_value) => {
-                        eprintln!(
-                            "DEBUG: get_all_documents_from_index - Document deserialized successfully: {:?}",
-                            json_value
-                        );
+                        // TRACE, not DEBUG: `json_value` carries the whole document,
+                        // and serde renders every `Vec<u8>` field as a list of single
+                        // numbers — one identity claim is ~2.4 kB of source and tens of
+                        // thousands of characters of output.
+                        tracing::trace!(document = ?json_value, "document deserialized");
                         let doc: Document = Box::new(json_value);
                         documents.push(doc);
                     }
                     Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to deserialize document for key '{}': {}",
-                            key, e
-                        );
+                        tracing::warn!("failed to deserialize document for key '{}': {}", key, e);
                     }
                 }
             } else {
-                eprintln!(
-                    "DEBUG: get_all_documents_from_index - No bytes found for key: {}",
-                    key
-                );
+                tracing::debug!("no bytes found for key: {}", key);
             }
         }
 
-        eprintln!(
-            "DEBUG: get_all_documents_from_index - Total documents collected: {}",
-            documents.len()
-        );
+        tracing::debug!("total documents collected: {}", documents.len());
         Ok(documents)
     }
 }
@@ -1464,7 +1446,7 @@ impl DocumentStore for DocumentStoreWrapper {
                 }
                 Err(e) => {
                     // Filter error - we log it but keep processing.
-                    eprintln!("Warning: Error applying filter to the document: {}", e);
+                    tracing::warn!("failed to apply the filter to the document: {}", e);
                     continue;
                 }
             }

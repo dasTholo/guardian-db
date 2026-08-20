@@ -104,7 +104,7 @@ impl StoreIndex for BaseIndex {
                 Ok(op) => op,
                 Err(e) => {
                     // Log the error but continue processing other entries.
-                    eprintln!("Warning: Error parsing operation: {}", e);
+                    tracing::warn!("failed to parse operation: {}", e);
                     continue;
                 }
             };
@@ -134,7 +134,7 @@ impl StoreIndex for BaseIndex {
                 }
                 _ => {
                     // Ignore unknown operations.
-                    eprintln!("Warning: Unknown operation ignored: {}", operation.op());
+                    tracing::warn!("unknown operation ignored: {}", operation.op());
                 }
             }
         }
