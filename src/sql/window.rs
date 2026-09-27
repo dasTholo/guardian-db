@@ -20,7 +20,7 @@ use crate::sql::exec::{Exec, Frame};
 use crate::sql::funcs;
 use crate::sql::names::{function_dispatch_name, ident_name};
 use crate::sql::row::{RowSchema, Tuple};
-use crate::sql::select::{aggregate_arg, compare_sort, expr_has_window, walk_expr};
+use crate::sql::select::{aggregate_arg, compare_sort, expr_has_window, sort_direction, walk_expr};
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, NamedWindowDefinition,
     NamedWindowExpr, OrderBy, OrderByKind, Select, SelectItem, WindowFrame, WindowFrameBound,
@@ -222,11 +222,8 @@ impl Exec {
         let directions: Vec<(bool, bool)> = spec
             .order_by
             .iter()
-            .map(|o| {
-                let asc = o.options.asc.unwrap_or(true);
-                (asc, o.options.nulls_first.unwrap_or(!asc))
-            })
-            .collect();
+            .map(|o| sort_direction(&o.options))
+            .collect::<Result<_>>()?;
         let mut order_keys: Vec<Vec<SqlValue>> = Vec::with_capacity(rows.len());
         for i in 0..rows.len() {
             let mut keys = Vec::with_capacity(spec.order_by.len());

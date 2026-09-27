@@ -174,7 +174,7 @@ image = { version = "0.25.10", optional = true, default-features = false, featur
 guardian-db-derive = { version = "0.17.0", path = "guardian-db-derive", optional = true }
 
 # SQL engine: `sql`
-sqlparser = { version = "0.62.0", optional = true }
+sqlparser = { version = "0.63.0", optional = true }
 rust_decimal = { version = "1.43.0", features = ["serde"], optional = true }
 unicode-normalization = { version = "0.1.25", optional = true }
 rust-stemmers = { version = "1.2.0", optional = true }

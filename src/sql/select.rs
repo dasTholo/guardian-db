@@ -8,8 +8,8 @@ use crate::sql::names::{ident_name, object_name_parts, split_schema_table};
 use crate::sql::row::{FieldRef, RowSchema, RowSet, Tuple};
 use sqlparser::ast::{
     Distinct, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Join,
-    JoinConstraint, JoinOperator, LimitClause, OrderBy, OrderByKind, Query, Select, SelectItem,
-    SetExpr, SetOperator, TableFactor, TableWithJoins,
+    JoinConstraint, JoinOperator, LimitClause, OrderBy, OrderByKind, OrderByOptions, OrderBySort,
+    Query, Select, SelectItem, SetExpr, SetOperator, TableFactor, TableWithJoins,
 };
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -524,7 +524,9 @@ impl Exec {
             _ => return Ok(None),
         };
         let first = &exprs[0];
-        if !first.options.asc.unwrap_or(true) || first.options.nulls_first.unwrap_or(false) {
+        if !matches!(first.options.sort, None | Some(OrderBySort::Asc))
+            || first.options.nulls_first.unwrap_or(false)
+        {
             return Ok(None);
         }
         let Expr::BinaryOp { left, op, right } = &first.expr else {
@@ -1219,11 +1221,8 @@ impl Exec {
         {
             let directions: Vec<(bool, bool)> = exprs
                 .iter()
-                .map(|o| {
-                    let asc = o.options.asc.unwrap_or(true);
-                    (asc, o.options.nulls_first.unwrap_or(!asc))
-                })
-                .collect();
+                .map(|o| sort_direction(&o.options))
+                .collect::<Result<_>>()?;
             let mut keyed: Vec<(Vec<SqlValue>, (usize, Tuple))> = Vec::with_capacity(paired.len());
             for (ri, out) in paired {
                 let mut keys = Vec::with_capacity(exprs.len());
@@ -1631,11 +1630,8 @@ impl Exec {
         if !order_exprs.is_empty() {
             let directions: Vec<(bool, bool)> = order_exprs
                 .iter()
-                .map(|o| {
-                    let asc = o.options.asc.unwrap_or(true);
-                    (asc, o.options.nulls_first.unwrap_or(!asc))
-                })
-                .collect();
+                .map(|o| sort_direction(&o.options))
+                .collect::<Result<_>>()?;
             out_rows.sort_by(|a, b| {
                 for (i, (asc, nf)) in directions.iter().enumerate() {
                     let ord = compare_sort(&a.0[i], &b.0[i], *asc, *nf);
@@ -1865,12 +1861,8 @@ impl Exec {
         }
         let directions: Vec<(bool, bool)> = exprs
             .iter()
-            .map(|ob| {
-                let asc = ob.options.asc.unwrap_or(true);
-                let nulls_first = ob.options.nulls_first.unwrap_or(!asc);
-                (asc, nulls_first)
-            })
-            .collect();
+            .map(|ob| sort_direction(&ob.options))
+            .collect::<Result<_>>()?;
         keyed.sort_by(|a, b| {
             for (i, (asc, nulls_first)) in directions.iter().enumerate() {
                 let ord = compare_sort(&a.0[i], &b.0[i], *asc, *nulls_first);
@@ -2915,6 +2907,22 @@ fn dedupe_values(values: Vec<SqlValue>) -> Vec<SqlValue> {
         }
     }
     out
+}
+
+/// `(ascending, nulls_first)` of one ORDER BY key, with PostgreSQL's NULL
+/// ordering defaults (ASC → NULLS LAST, DESC → NULLS FIRST). The PostgreSQL
+/// `USING <operator>` sort form is not supported.
+pub(crate) fn sort_direction(options: &OrderByOptions) -> Result<(bool, bool)> {
+    let asc = match &options.sort {
+        None | Some(OrderBySort::Asc) => true,
+        Some(OrderBySort::Desc) => false,
+        Some(OrderBySort::Using(op)) => {
+            return Err(SqlError::FeatureNotSupported(format!(
+                "ORDER BY ... USING {op} not supported"
+            )));
+        }
+    };
+    Ok((asc, options.nulls_first.unwrap_or(!asc)))
 }
 
 pub(crate) fn compare_sort(a: &SqlValue, b: &SqlValue, asc: bool, nulls_first: bool) -> Ordering {

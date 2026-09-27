@@ -132,7 +132,7 @@ impl Exec {
             } => self.eval_like(
                 expr,
                 pattern,
-                escape_char.as_ref(),
+                escape_char.as_deref(),
                 *negated,
                 false,
                 frames,
@@ -147,7 +147,7 @@ impl Exec {
             } => self.eval_like(
                 expr,
                 pattern,
-                escape_char.as_ref(),
+                escape_char.as_deref(),
                 *negated,
                 true,
                 frames,
@@ -624,20 +624,30 @@ impl Exec {
         &self,
         expr: &Expr,
         pattern: &Expr,
-        escape: Option<&sqlparser::ast::ValueWithSpan>,
+        escape: Option<&Expr>,
         negated: bool,
         case_insensitive: bool,
         frames: &[Frame],
         aggs: Option<&HashMap<String, SqlValue>>,
     ) -> Result<SqlValue> {
+        // Only a literal ESCAPE is supported (the form the parser accepted
+        // before sqlparser 0.63 widened it to an arbitrary expression).
+        let escape_char = match escape {
+            None => None,
+            Some(Expr::Value(e)) => string_of_value(&e.value)
+                .ok()
+                .and_then(|s| s.chars().next()),
+            Some(other) => {
+                return Err(SqlError::FeatureNotSupported(format!(
+                    "non-literal LIKE ESCAPE {other} not supported"
+                )));
+            }
+        };
         let v = self.eval_inner(expr, frames, aggs)?;
         let p = self.eval_inner(pattern, frames, aggs)?;
         if v.is_null() || p.is_null() {
             return Ok(SqlValue::Null);
         }
-        let escape_char = escape
-            .and_then(|e| string_of_value(&e.value).ok())
-            .and_then(|s| s.chars().next());
         let matched = funcs::like_match(
             &v.to_text().unwrap_or_default(),
             &p.to_text().unwrap_or_default(),
