@@ -144,18 +144,18 @@ iroh-io = "0.6.2"
 iroh-blobs = "0.103.0"
 iroh-gossip = "0.101.0"
 iroh-docs = "0.101.0"
-iroh-mdns-address-lookup = "0.4.0"
+iroh-mdns-address-lookup = "0.5.0"
 
 # Storage & caching
 redb = "4.3.0"
 lru = "0.18.5"
-zstd = "0.13.3"
+zstd = "0.14.0"
 tempfile = "3.27.0"
 
 # Observability
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-opentelemetry = "0.32.0"
+opentelemetry = "0.33.0"
 
 # Errors, time, IDs & misc
 thiserror = "2.0.21"
