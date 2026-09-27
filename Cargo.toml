@@ -192,10 +192,10 @@ reqwest = { version = "0.13.5", optional = true, default-features = false, featu
 ] }
 
 # Guardian Compute (WASM): `compute*`
-# wasmtime 49 + wasmtime-wasi-nn 49 + ort rc.13 measured 2026-09-27: wasmtime-wasi-nn 49.0.1's own onnx backend does not compile against ort rc.13 (ort::tensor, session::Input/Output, CPUExecutionProvider gone) — stay on 47.0.4 / =2.0.0-rc.10.
-wasmtime = { version = "47.0.4", default-features = false, features = ["runtime", "cranelift"], optional = true }
+# wasmtime 49 measured 2026-09-27: builds with ort kept at =2.0.0-rc.10; ort rc.13 stays out — wasmtime-wasi-nn 49.0.1's onnx backend does not compile against it (ort::tensor, session::Input/Output, CPUExecutionProvider gone).
+wasmtime = { version = "49.0.1", default-features = false, features = ["runtime", "cranelift"], optional = true }
 sysinfo = { version = "0.39.6", optional = true }       # capacity telemetry
-wasmtime-wasi-nn = { version = "47.0.4", default-features = false, features = ["onnx-download"], optional = true } # `compute-nn`
+wasmtime-wasi-nn = { version = "49.0.1", default-features = false, features = ["onnx-download"], optional = true } # `compute-nn`
 ort = { version = "=2.0.0-rc.10", default-features = false, optional = true }  # `compute-nn` (ONNX Runtime; pinned, see wasi-nn)
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"], optional = true } # `embedding-onnx`
 
