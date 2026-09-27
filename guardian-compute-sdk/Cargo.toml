@@ -25,11 +25,11 @@ guardian-compute-sdk-macros = { version = "0.1.0", path = "../guardian-compute-s
 # CBOR codec for the typed layer. `serde_cbor` is unmaintained upstream;
 # ciborium is the serde-ecosystem replacement and builds cleanly for
 # wasm32-unknown-unknown.
-ciborium = { version = "0.2", optional = true }
-serde = { version = "1", optional = true }
+ciborium = { version = "0.2.2", optional = true }
+serde = { version = "1.0.229", optional = true }
 
 [dev-dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 
 # Sample tasks compiled to `wasm32-unknown-unknown` by the golden e2e test in
 # the main crate (tests/compute_sdk.rs). `crate-type = ["cdylib"]` makes the
