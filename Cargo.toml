@@ -160,7 +160,9 @@ opentelemetry = "0.32.0"
 # Errors, time, IDs & misc
 thiserror = "2.0.19"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.24.0", features = ["serde"] }
+# v4 is base: the p2p core calls Uuid::new_v4() ungated; it used to be enabled
+# only transitively (moka via hickory-resolver 0.26.1).
+uuid = { version = "1.24.0", features = ["serde", "v4"] }
 fastrand = "2.5.0" # non-crypto RNG (jitter/backoff)
 
 # Terminal UI: `sentinel`
