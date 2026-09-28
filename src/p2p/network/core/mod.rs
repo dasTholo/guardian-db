@@ -9,7 +9,7 @@ use crate::guardian::error::{GuardianError, Result};
 use crate::p2p::network::{config::ClientConfig, types::*};
 use bytes::Bytes;
 use iroh::SecretKey;
-use iroh::endpoint::Endpoint;
+use iroh::endpoint::{BindOpts, Endpoint};
 use iroh::protocol::Router;
 use iroh::{EndpointAddr as NodeAddr, EndpointId as NodeId};
 use iroh_blobs::api::Tag;
@@ -19,6 +19,7 @@ use iroh_docs::protocol::Docs;
 use iroh_gossip::net::Gossip;
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -596,6 +597,35 @@ impl IrohBackend {
             Endpoint::builder(iroh::endpoint::presets::N0)
         } else {
             Endpoint::builder(iroh::endpoint::presets::Minimal)
+        };
+
+        // The UDP port, when the configuration names one (`bind_port`). A closed
+        // deployment states its addresses in advance — with discovery off, a peer
+        // reaches this node at `<host>:<port>` or not at all — and a port the OS
+        // picked at random is no address anyone could have stated. Until now no
+        // fixed port was ever bound: `port` was read by `validate()` alone.
+        //
+        // A bind address REPLACES the builder's pre-configured unspecified bind for
+        // its address family (iroh 1.2, `Builder::bind_addr`). IPv4 is required, so
+        // a port already in use fails the start instead of silently moving the node
+        // somewhere nobody looks. IPv6 stays optional, as the pre-configured `[::]`
+        // it replaces was: a host without IPv6 still starts. Both on one port is
+        // no conflict — `netwatch` sets `IPV6_V6ONLY` on every IPv6 socket.
+        //
+        // `None` and `Some(0)` leave the builder alone: the OS picks, as before.
+        let builder = match self.config.bind_port {
+            Some(port) if port > 0 => builder
+                .bind_addr((Ipv4Addr::UNSPECIFIED, port))
+                .and_then(|b| {
+                    b.bind_addr_with_opts(
+                        (Ipv6Addr::UNSPECIFIED, port),
+                        BindOpts::default().set_is_required(false),
+                    )
+                })
+                .map_err(|e| {
+                    GuardianError::Other(format!("Invalid bind address for port {}: {}", port, e))
+                })?,
+            _ => builder,
         };
         let endpoint = builder
             .secret_key(self.secret_key.clone())

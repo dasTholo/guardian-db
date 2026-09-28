@@ -18,8 +18,22 @@ pub struct ClientConfig {
     /// Path where Iroh data is stored (blobs + docs).
     pub data_store_path: Option<PathBuf>,
 
-    /// Port for the Iroh endpoint (0 = random port).
+    /// Port for the Iroh endpoint (0 = random port). Validated but never bound —
+    /// the endpoint binds a fixed port only through `bind_port`.
     pub port: u16,
+
+    /// The UDP port the endpoint binds, on `0.0.0.0` and `[::]` — `None` (and
+    /// `Some(0)`) lets the OS pick one at random.
+    ///
+    /// An explicit opt-in and deliberately NOT `port`: `production()` has always
+    /// set `port: 4001`, and honouring that field would make every production
+    /// configuration bind 4001 from one release to the next. `None` in every
+    /// preset, so nothing binds a fixed port unless its caller asked for one.
+    /// What asks is a closed deployment: with discovery off, peers reach this
+    /// node only at the addresses stated in advance, and a random port is no
+    /// address anyone can state.
+    #[serde(default)]
+    pub bind_port: Option<u16>,
 
     /// Known peers to connect to initially.
     pub known_peers: Vec<NodeId>,
@@ -46,6 +60,7 @@ impl Default for ClientConfig {
             enable_pubsub: true,
             data_store_path: Some(PathBuf::from("./iroh_data")),
             port: 0, // Random port.
+            bind_port: None,
             known_peers: vec![],
             enable_discovery_n0: true,   // Discovery via Pkarr/DNS.
             enable_discovery_mdns: true, // Local discovery.
@@ -63,6 +78,7 @@ impl ClientConfig {
             enable_pubsub: true,
             data_store_path: Some("./tmp/iroh_dev".into()),
             port: 0, // Random port.
+            bind_port: None,
             known_peers: vec![],
             enable_discovery_n0: false,  // Disabled for local dev.
             enable_discovery_mdns: true, // Local discovery only.
@@ -78,6 +94,7 @@ impl ClientConfig {
             enable_pubsub: true,
             data_store_path: Some("/var/lib/iroh".into()),
             port: 4001,                  // Fixed port for production.
+            bind_port: None,             // `port` is not bound; see `bind_port`.
             known_peers: vec![],         // Would be populated with peers.
             enable_discovery_n0: true,   // Global discovery via n0.computer.
             enable_discovery_mdns: true, // Local discovery as well.
@@ -93,6 +110,7 @@ impl ClientConfig {
             enable_pubsub: true,
             data_store_path: None, // In-memory.
             port: 0,               // Random port.
+            bind_port: None,
             known_peers: vec![],
             enable_discovery_n0: false,
             enable_discovery_mdns: false,
@@ -395,6 +413,21 @@ mod tests {
         assert!(!config.enable_pubsub);
         assert!(!config.enable_discovery_n0);
         assert!(!config.enable_discovery_mdns);
+    }
+
+    /// No preset binds a fixed port — not even `production()`, whose `port: 4001`
+    /// stays inert. `bind_port` is an opt-in its caller states.
+    #[test]
+    fn no_preset_binds_a_fixed_port() {
+        for (name, config) in [
+            ("default", ClientConfig::default()),
+            ("development", ClientConfig::development()),
+            ("production", ClientConfig::production()),
+            ("testing", ClientConfig::testing()),
+            ("offline", ClientConfig::offline()),
+        ] {
+            assert_eq!(config.bind_port, None, "{name}() asks for a fixed port");
+        }
     }
 
     #[test]

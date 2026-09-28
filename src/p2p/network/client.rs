@@ -713,4 +713,68 @@ mod tests {
         assert!(config.enable_discovery_n0, "production keeps global discovery");
         assert!(config.enable_discovery_mdns, "production keeps local discovery");
     }
+
+    /// Binds a discovery-free node with `bind_port` and returns the endpoint's
+    /// bound sockets. The `TempDir` goes back too: dropping it early would delete
+    /// the store under the running node.
+    async fn bound_sockets_with(
+        bind_port: Option<u16>,
+    ) -> (Vec<std::net::SocketAddr>, IrohClient, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = ClientConfig::testing();
+        config.data_store_path = Some(dir.path().to_path_buf());
+        config.bind_port = bind_port;
+        let client = IrohClient::new(config).await.unwrap();
+        let endpoint = client.backend().get_endpoint().await.unwrap();
+        let sockets = endpoint
+            .read()
+            .await
+            .as_ref()
+            .expect("the endpoint bound")
+            .bound_sockets();
+        (sockets, client, dir)
+    }
+
+    /// `bind_port` is bound, not merely validated: the endpoint's IPv4 socket
+    /// sits on exactly that port, and nobody else can take it while the node
+    /// runs. IPv6 is optional (`initialize_node`), so it is asserted only where
+    /// the host gave one.
+    ///
+    /// The free port comes from the OS and is released a moment before the node
+    /// binds it — a window another process could win, which would fail this test
+    /// loudly rather than pass it wrongly.
+    #[tokio::test]
+    async fn a_configured_bind_port_is_the_port_the_endpoint_holds() {
+        let port = std::net::UdpSocket::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+
+        let (sockets, _client, _dir) = bound_sockets_with(Some(port)).await;
+
+        assert!(
+            sockets.iter().any(|s| s.is_ipv4() && s.port() == port),
+            "bind_port {port} is not among the bound sockets: {sockets:?}"
+        );
+        assert!(
+            sockets.iter().filter(|s| s.is_ipv6()).all(|s| s.port() == port),
+            "the IPv6 socket went elsewhere than bind_port {port}: {sockets:?}"
+        );
+        assert!(
+            std::net::UdpSocket::bind(("0.0.0.0", port)).is_err(),
+            "port {port} is still free while the node runs"
+        );
+    }
+
+    /// `Some(0)` is the same as `None`: the OS picks, as before `bind_port`.
+    #[tokio::test]
+    async fn a_zero_bind_port_lets_the_os_pick() {
+        let (sockets, _client, _dir) = bound_sockets_with(Some(0)).await;
+
+        assert!(
+            sockets.iter().any(|s| s.is_ipv4() && s.port() != 0),
+            "no IPv4 socket bound: {sockets:?}"
+        );
+    }
 }
