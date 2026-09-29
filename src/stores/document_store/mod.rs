@@ -20,7 +20,7 @@ use iroh_docs::{AuthorId, Capability, api::Doc, store::Query};
 use opentelemetry::trace::{TracerProvider, noop::NoopTracerProvider};
 use parking_lot::RwLock;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{Span, debug, info, instrument, warn};
 
@@ -79,6 +79,13 @@ impl DocumentStoreIndex {
         guard.clear();
     }
 
+    /// Drop every key not in `keep`, in ONE write — the pruning half of
+    /// `refresh_in_place`, which never clears.
+    pub fn retain_keys(&self, keep: &HashSet<&str>) {
+        let mut guard = self.index.write();
+        guard.retain(|key, _| keep.contains(key.as_str()));
+    }
+
     /// Replace the whole map in ONE write.
     ///
     /// The reason it exists is that `clear_all` + refill is visible from
@@ -113,11 +120,15 @@ impl DocumentStoreIndex {
     }
 }
 
-/// Rebuilds the in-memory index from the current state of the iroh-docs document.
+/// Refreshes the in-memory index from the current state of the iroh-docs document.
 /// Shared between `sync_index_from_docs` and the reactive live-sync task.
 ///
-/// IT CLEARS AND REFILLS, and that is a MEASURED decision rather than the
-/// state nobody got round to changing. `LI` swapped this loop for
+/// **`L7`:** this block opened with "IT CLEARS AND REFILLS, and that is a
+/// MEASURED decision rather than the state nobody got round to changing".
+/// It no longer clears — see IN PLACE below. The measurement that sentence
+/// stood on still holds, and it is why the replacement is not the swap:
+///
+/// `LI` swapped this loop for
 /// [`rebuild_from`] + [`DocumentStoreIndex::replace_all`], which removes
 /// the window in which this index is empty, and then measured three
 /// blocks of 60 suite runs at two gitlinks under one compiler: the swap
@@ -136,6 +147,29 @@ impl DocumentStoreIndex {
 /// `T2` and `T3` hold it down — but trading it for a later-and-all-at-once
 /// window measured worse. Whoever tries again should measure before
 /// wiring it up: no gate here covers the CALLER, only the building block.
+///
+/// IN PLACE, NOT SWAPPED, and not the clear either (`LN §14.2` Task 25 (8),
+/// user decision 2026-09-29). Each key is written the moment its own
+/// `cat_bytes` returns, exactly as under the clear — the property the
+/// hypothesis above credits the clear with is kept. What the clear added on
+/// top is gone: every key absent until its fetch returned, and a key whose
+/// fetch FAILED (`Error::Io`, the blob not local yet) absent for the whole
+/// of that rebuild. That second absence is what `LN` F3 and F4 read as "the
+/// store holds no such value". A failed fetch now keeps the key's previous
+/// value — stale until the blob arrives, never absent; a key that had none
+/// stays absent, as before. Keys leave only when the document no longer
+/// holds them: missing from the snapshot, or a deletion marker
+/// (`content_len() == 0`). That pruning runs BEFORE the first `await`, where
+/// `clear_all` sat, so a local write during the loop survives it exactly as
+/// it survived the clear: the local-write race is as narrow as it was, not
+/// widened the way the swap widened it (`LI §10.9` finding 5).
+///
+/// THE CALLER IS COVERED this time, which is the lesson `LI §9` paid for:
+/// the loop is `refresh_in_place`, which this function calls and the unit
+/// gates call too, and `tests/doc_index_refresh.rs` runs the whole of this
+/// through `Store::load`. What is NOT measured yet is the rate: whether
+/// this lowers F3's reader-side deletions and F4's 422 in `local_net` is a
+/// block of runs that has not been driven when this was written.
 async fn refresh_doc_index(
     docs: &WillowDocs,
     doc: &Doc,
@@ -146,33 +180,68 @@ async fn refresh_doc_index(
         .get_many(doc, Query::single_latest_per_key().build())
         .await?;
 
-    index.clear_all();
-    let mut count = 0;
-
-    for entry in &entries {
-        let key = String::from_utf8_lossy(entry.key()).to_string();
-
-        if entry.content_len() == 0 {
-            continue;
-        }
-
-        let hash_str = entry.content_hash().to_hex();
-        match client.cat_bytes(&hash_str).await {
-            Ok(value) => {
-                index.insert(key, value);
-                count += 1;
-            }
-            Err(e) => {
-                warn!("Failed to read content for key from iroh-docs: {:?}", e);
-            }
-        }
-    }
+    let snapshot = entries
+        .iter()
+        .map(|entry| {
+            let key = String::from_utf8_lossy(entry.key()).to_string();
+            let hash = (entry.content_len() > 0).then(|| entry.content_hash().to_hex());
+            (key, hash)
+        })
+        .collect();
+    let count = refresh_in_place(index, snapshot, |hash: String| async move {
+        client.cat_bytes(&hash).await
+    })
+    .await;
 
     debug!(
         "DocumentStore index synchronized from iroh-docs: {} entries",
         count
     );
     Ok(count)
+}
+
+/// The body of [`refresh_doc_index`] after the `get_many`: `snapshot` is
+/// its entries as `(key, Some(content hash))`, or `None` for a deletion
+/// marker, and `fetch` is `cat_bytes`.
+///
+/// SPLIT FROM ITS SOURCE for the reason `rebuild_from` was — so a gate can
+/// hold it mid-flight — with the one difference `LI §9` asked for: this is
+/// the loop production runs, not a block beside it.
+async fn refresh_in_place<F, Fut>(
+    index: &DocumentStoreIndex,
+    snapshot: Vec<(String, Option<String>)>,
+    fetch: F,
+) -> usize
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>>>,
+{
+    // Where `clear_all` sat: before the first `await`, so nothing written
+    // locally during the loop below can be pruned by it.
+    let live: HashSet<&str> = snapshot
+        .iter()
+        .filter(|(_, hash)| hash.is_some())
+        .map(|(key, _)| key.as_str())
+        .collect();
+    index.retain_keys(&live);
+
+    let mut count = 0;
+    for (key, hash) in snapshot {
+        let Some(hash) = hash else { continue };
+        match fetch(hash).await {
+            Ok(value) => {
+                index.insert(key, value);
+                count += 1;
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to read content for key from iroh-docs, keeping its previous value: {:?}",
+                    e
+                );
+            }
+        }
+    }
+    count
 }
 
 /// Build the next map from `keys` and install it in ONE write.
@@ -191,6 +260,11 @@ async fn refresh_doc_index(
 // the paragraph above describes the path `LI` built and the measurement
 // then took away — read it as the starting point of a second attempt, not
 // as a description of what this tree runs.
+//
+// `L7`: "went back to clear-and-refill" held until `LN` Task 25 (8). The
+// second attempt did not start from here: it refreshes in place
+// (`refresh_in_place`), because this block delays every key to the end,
+// which is the half of the swap that measured worse.
 //
 // IT STAYS because it is the building block `LI T2` stands on: that gate
 // can hold a rebuild mid-flight only because the fetch is a parameter
@@ -1282,8 +1356,9 @@ impl GuardianDBDocumentStore {
     /// - against [`Self::query`]: it never looks at `self.index`, so a rebuild
     ///   running beside it cannot empty its answer;
     /// - against [`refresh_doc_index`]: an entry it cannot fetch or decode is an
-    ///   ERROR and not a `warn!` and a skip. For a cache a dropped entry is a
-    ///   miss the next read repairs; for a lineage it is an invisible ancestor,
+    ///   ERROR and not a `warn!` that keeps whatever the index held for the key
+    ///   (`L7`: "and a skip" until `LN` Task 25 (8)). For a cache a dropped
+    ///   entry is a miss the next read repairs; for a lineage it is an invisible ancestor,
     ///   which is the same fork this whole path exists to prevent — only quieter.
     ///   Same line as `an_unreadable_peer_makes_list_fail_instead_of_shortening_it`.
     ///
@@ -1552,5 +1627,152 @@ mod tests {
         assert_eq!(task.await.unwrap(), 2, "both entries were fetched");
         assert_eq!(index.get_value("a"), Some(b"NEW-a".to_vec()));
         assert_eq!(index.get_value("b"), Some(b"NEW-b".to_vec()));
+    }
+
+    // THE THREE GATES BELOW CALL THE LOOP PRODUCTION RUNS. `LI`'s gates
+    // held a building block nobody called (`LI §9`, the mutation probe that
+    // left 902/902 green); `refresh_in_place` is the body of
+    // `refresh_doc_index` minus the `get_many` and the mapping of its
+    // entries, so a `clear_all` put back into it turns these red. The part
+    // they cannot reach — the snapshot itself — is held from the outside by
+    // `tests/doc_index_refresh.rs` through `Store::load`.
+
+    #[tokio::test]
+    async fn a_key_whose_fetch_fails_keeps_its_previous_value() {
+        // The state F3 and F4 meet after a restart: the document already
+        // names a newer entry for a key whose blob is not local yet. The old
+        // form cleared the key and then could not refill it, so for the whole
+        // of that rebuild the store read as holding no value at all.
+        let index = DocumentStoreIndex::new();
+        index.insert("a".to_string(), b"OLD-A".to_vec());
+        index.insert("b".to_string(), b"OLD-B".to_vec());
+
+        let fetch = |hash: String| async move {
+            if hash == "a" {
+                Err(GuardianError::Store("blob not local yet".to_string()))
+            } else {
+                Ok(format!("NEW-{hash}").into_bytes())
+            }
+        };
+        let count = refresh_in_place(
+            &index,
+            vec![
+                ("a".to_string(), Some("a".to_string())),
+                ("b".to_string(), Some("b".to_string())),
+            ],
+            fetch,
+        )
+        .await;
+
+        assert_eq!(count, 1, "only the fetch that returned counts");
+        assert_eq!(
+            index.get_value("a"),
+            Some(b"OLD-A".to_vec()),
+            "a failed fetch keeps what the index held — stale, but not absent"
+        );
+        assert_eq!(index.get_value("b"), Some(b"NEW-b".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn a_key_gone_from_the_document_leaves_the_index() {
+        // The other half of "no clear": without it nothing removes a key,
+        // so the refresh has to do it for the two ways a key leaves — a
+        // deletion marker (`content_len() == 0`, here `None`) and no entry
+        // in the snapshot at all.
+        let index = DocumentStoreIndex::new();
+        index.insert("kept".to_string(), b"OLD".to_vec());
+        index.insert("deleted".to_string(), b"OLD".to_vec());
+        index.insert("vanished".to_string(), b"OLD".to_vec());
+
+        let fetch = |hash: String| async move { Ok(format!("NEW-{hash}").into_bytes()) };
+        refresh_in_place(
+            &index,
+            vec![
+                ("kept".to_string(), Some("kept".to_string())),
+                ("deleted".to_string(), None),
+            ],
+            fetch,
+        )
+        .await;
+
+        assert_eq!(index.get_value("kept"), Some(b"NEW-kept".to_vec()));
+        assert_eq!(index.get_value("deleted"), None, "a deletion marker removes");
+        assert_eq!(index.get_value("vanished"), None, "absence removes");
+        assert_eq!(index.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_held_mid_flight_leaves_no_key_absent_and_a_local_write_standing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // `LI T2`'s channel, pointed at the loop production runs. Held
+        // between entry 1 and entry 2, the index has to show THREE things at
+        // once: the fetched key already NEW (what the swap lost, `LI §10.6`),
+        // the unfetched key still OLD (what the clear lost), and neither
+        // absent.
+        let index = Arc::new(DocumentStoreIndex::new());
+        index.insert("a".to_string(), b"OLD-A".to_vec());
+        index.insert("b".to_string(), b"OLD-B".to_vec());
+
+        let (reached_tx, mut reached_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let release = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let fetch = move |hash: String| {
+            let reached_tx = reached_tx.clone();
+            let release = Arc::clone(&release);
+            let calls = Arc::clone(&calls);
+            async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    reached_tx.send(()).await.unwrap();
+                    let rx = release.lock().await.take().unwrap();
+                    rx.await.unwrap();
+                }
+                Ok(format!("NEW-{hash}").into_bytes())
+            }
+        };
+
+        let index_for_task = Arc::clone(&index);
+        let task = tokio::spawn(async move {
+            refresh_in_place(
+                &index_for_task,
+                vec![
+                    ("a".to_string(), Some("a".to_string())),
+                    ("b".to_string(), Some("b".to_string())),
+                ],
+                fetch,
+            )
+            .await
+        });
+
+        reached_rx.recv().await.unwrap();
+
+        assert_eq!(
+            index.get_value("a"),
+            Some(b"NEW-a".to_vec()),
+            "a key is visible the moment its own fetch returns"
+        );
+        assert_eq!(
+            index.get_value("b"),
+            Some(b"OLD-B".to_vec()),
+            "a key not fetched yet still answers its old value, never nothing"
+        );
+
+        // A LOCAL WRITE landing mid-flight — `put_impl` sets the index
+        // directly — is not in the snapshot. It must outlive the refresh,
+        // as it did under the clear, whose clear sat before the first
+        // `await`: pruning at the END would widen the local-write race the
+        // way the swap did (`LI §10.9` finding 5).
+        index.insert("local".to_string(), b"LOCAL".to_vec());
+
+        release_tx.send(()).unwrap();
+        assert_eq!(task.await.unwrap(), 2);
+        assert_eq!(index.get_value("b"), Some(b"NEW-b".to_vec()));
+        assert_eq!(
+            index.get_value("local"),
+            Some(b"LOCAL".to_vec()),
+            "a key written during the refresh survives it"
+        );
     }
 }

@@ -78,6 +78,11 @@ async fn scan_docs_reads_the_doc_where_query_reads_an_index_that_was_just_cleare
     // moves. The cleared index is not a contrivance — it is the state
     // `refresh_doc_index` puts this very index into on every remote event,
     // built by hand here so it is a state and not a race.
+    //
+    // `L7`: "puts this very index into" held until `LN` Task 25 (8); the
+    // refresh no longer clears (`tests/doc_index_refresh.rs`). The contrast
+    // still holds for an index that IS empty — a fresh store before its
+    // first refresh, or `StoreIndex::clear` as below.
     let node = TestNode::new("scan-docs-node").await.unwrap();
     let docs = node.db.docs("scan-docs", None).await.unwrap();
 
