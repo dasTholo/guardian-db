@@ -21,6 +21,10 @@ use super::IrohBackend;
 pub struct WillowDocs {
     /// Instance of the Docs protocol.
     docs: Arc<Docs>,
+    /// The blob store the Docs engine keeps its content in — the SAME store,
+    /// handed in at `Docs::spawn` (`IrohBackend::initialize_node`). Held here so
+    /// [`Self::set_bytes`] can make a value durable before its entry exists.
+    blobs: iroh_blobs::api::Store,
     /// Default author used for all write operations.
     default_author: Option<AuthorId>,
 }
@@ -42,9 +46,11 @@ impl WillowDocs {
             .ok_or_else(|| GuardianError::Other("Docs not initialized in the backend".into()))?
             .clone();
         drop(docs_lock);
+        let blobs = backend.get_store_for_blobs().await?.read().await.as_ref().clone();
 
         Ok(Self {
             docs: Arc::new(docs),
+            blobs,
             default_author: None,
         })
     }
@@ -239,6 +245,25 @@ impl WillowDocs {
 
     /// Sets a value for a key in a document.
     ///
+    /// # The blob is durable before the entry exists
+    ///
+    /// Three steps and not iroh-docs' one `Doc::set_bytes`, which adds the blob
+    /// and inserts the entry back to back with neither committed. The two
+    /// stores batch their commits apart: iroh-docs commits at most
+    /// `MAX_COMMIT_DELAY` (500 ms) after an insert, the `FsStore` meta actor
+    /// keeps its write transaction open for up to `max_read_duration` (1 s)
+    /// (iroh-blobs 0.103, `store/fs/meta.rs`, `Actor::run`). A process killed
+    /// between the two commits restarted with a durable entry whose content was
+    /// gone, and nothing ever fetches an own entry's content again, so every
+    /// later `scan_docs` over that prefix failed (`LN` F1, Task 25 (9)).
+    ///
+    /// So: add the blob, then `sync_db` — a top-level command the meta actor
+    /// only answers after it has committed the write transaction the add sits
+    /// in (`extract` hands the non-batchable command back, the batch ends, the
+    /// commit runs, then the command) — and only then `set_hash`. A kill now
+    /// leaves either no entry or an entry with its blob. The temp tag guards
+    /// the blob against garbage collection until the entry references it.
+    ///
     /// # Arguments
     /// * `doc` - Reference to the document
     /// * `author_id` - Author ID for this operation
@@ -254,24 +279,29 @@ impl WillowDocs {
         key: impl Into<Bytes>,
         value: impl Into<Bytes>,
     ) -> Result<iroh_blobs::Hash> {
-        match doc.set_bytes(author_id, key, value).await {
-            Ok(hash) => {
-                debug!("Set bytes in document {:?}: hash={:?}", doc.id(), hash);
-                // Convert from iroh_docs::Hash (0.92.0) to iroh_blobs::Hash (0.94.0).
-                // Both share the same hash structure (BLAKE3, 32 bytes), so the
-                // conversion through the bytes is safe.
-                let hash_bytes = hash.as_bytes();
-                let result_hash = iroh_blobs::Hash::from_bytes(*hash_bytes);
-                Ok(result_hash)
-            }
-            Err(e) => {
-                error!("Failed to set bytes: {:?}", e);
-                Err(GuardianError::Storage(format!(
-                    "Failed to set bytes: {:?}",
-                    e
-                )))
-            }
-        }
+        let failed = |step: &str, e: &dyn std::fmt::Debug| {
+            error!("Failed to set bytes ({step}): {:?}", e);
+            GuardianError::Storage(format!("Failed to set bytes ({step}): {:?}", e))
+        };
+        let value: Bytes = value.into();
+        let size = value.len() as u64;
+        let tag = self
+            .blobs
+            .add_bytes(value)
+            .temp_tag()
+            .await
+            .map_err(|e| failed("add blob", &e))?;
+        let hash = tag.hash();
+        self.blobs
+            .sync_db()
+            .await
+            .map_err(|e| failed("commit blob", &e))?;
+        doc.set_hash(author_id, key, hash, size)
+            .await
+            .map_err(|e| failed("insert entry", &e))?;
+        drop(tag);
+        debug!("Set bytes in document {:?}: hash={:?}", doc.id(), hash);
+        Ok(hash)
     }
 
     /// Removes a key from a document.
