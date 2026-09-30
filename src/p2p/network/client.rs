@@ -767,6 +767,30 @@ mod tests {
         );
     }
 
+    /// A port somebody else holds fails the start: IPv4 is required, so the node
+    /// never moves silently to a port nobody looks at. Pins behaviour that
+    /// already held, so it was green on first run.
+    #[tokio::test]
+    async fn a_taken_bind_port_fails_the_start() {
+        let holder = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = holder.local_addr().unwrap().port();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = ClientConfig::testing();
+        config.data_store_path = Some(dir.path().to_path_buf());
+        config.bind_port = Some(port);
+        let started = match IrohClient::new(config).await {
+            Ok(client) => client.backend().get_endpoint().await.map(|_| client),
+            Err(e) => Err(e),
+        };
+
+        assert!(
+            started.is_err(),
+            "the node started although port {port} is taken"
+        );
+        drop(holder);
+    }
+
     /// `Some(0)` is the same as `None`: the OS picks, as before `bind_port`.
     #[tokio::test]
     async fn a_zero_bind_port_lets_the_os_pick() {

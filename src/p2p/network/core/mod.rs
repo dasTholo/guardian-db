@@ -602,8 +602,8 @@ impl IrohBackend {
         // The UDP port, when the configuration names one (`bind_port`). A closed
         // deployment states its addresses in advance — with discovery off, a peer
         // reaches this node at `<host>:<port>` or not at all — and a port the OS
-        // picked at random is no address anyone could have stated. Until now no
-        // fixed port was ever bound: `port` was read by `validate()` alone.
+        // picked at random is no address anyone could have stated. `port` is read
+        // by `validate()` alone and never bound; only `bind_port` binds.
         //
         // A bind address REPLACES the builder's pre-configured unspecified bind for
         // its address family (iroh 1.2, `Builder::bind_addr`). IPv4 is required, so
