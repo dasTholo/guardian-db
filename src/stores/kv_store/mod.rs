@@ -176,7 +176,7 @@ async fn refresh_kv_index(
     }
 
     debug!(
-        "KeyValue index synchronized from iroh-docs: {} entries",
+        "KeyValue index synchronized from iroh-docs: {} keys read",
         count
     );
     Ok(count)

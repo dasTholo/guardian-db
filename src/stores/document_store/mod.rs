@@ -167,9 +167,12 @@ impl DocumentStoreIndex {
 /// THE CALLER IS COVERED this time, which is the lesson `LI §9` paid for:
 /// the loop is `refresh_in_place`, which this function calls and the unit
 /// gates call too, and `tests/doc_index_refresh.rs` runs the whole of this
-/// through `Store::load`. What is NOT measured yet is the rate: whether
-/// this lowers F3's reader-side deletions and F4's 422 in `local_net` is a
-/// block of runs that has not been driven when this was written.
+/// through `Store::load`. The rate in `local_net` was measured afterwards
+/// (root `LN §14.4`): 20 chain runs with this loop at the root's `5fddbbe`
+/// went 20 green, F4's 422 in 0 of 20 (3 and 4 of 20 at the two states
+/// before) and reader-side deletions after the restart in 7 of 20 runs (11
+/// of 16 before); with the F1 and F5 fixes on top, the acceptance series
+/// went 29 of 29 green, F4 in 0 of 29.
 async fn refresh_doc_index(
     docs: &WillowDocs,
     doc: &Doc,
@@ -194,7 +197,7 @@ async fn refresh_doc_index(
     .await;
 
     debug!(
-        "DocumentStore index synchronized from iroh-docs: {} entries",
+        "DocumentStore index synchronized from iroh-docs: {} keys read",
         count
     );
     Ok(count)
@@ -649,7 +652,10 @@ impl GuardianDBDocumentStore {
 
     /// Synchronizes the local index with the current state of the iroh-docs document.
     ///
-    /// Queries all document entries and rebuilds the in-memory index.
+    /// Queries the latest entry of every key and refreshes the in-memory
+    /// index in place (`refresh_doc_index`): keys the document no longer
+    /// holds are pruned, every other key is read again, and a key whose
+    /// content cannot be read keeps its previous value.
     pub async fn sync_index_from_docs(&self) -> Result<usize> {
         refresh_doc_index(&self.docs, &self.doc_handle, &self.client, &self.index).await
     }
