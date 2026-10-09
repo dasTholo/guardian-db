@@ -340,7 +340,14 @@ impl WillowDocs {
     ///
     /// Known effect: the insert sets this author's head in iroh-docs'
     /// `latest_per_author` to `timestamp` unconditionally, so it may lower the
-    /// author's head until the author's next ordinary write.
+    /// author's head until the author's next ordinary write. A lowered head only
+    /// makes syncs more likely (measured, `tests/stamped_head.rs`); it blocks none.
+    ///
+    /// Delivery (`SR` D10): a stamped row is not gossiped. A peer that has
+    /// already joined the namespace gets it only with the next range sync — a
+    /// join, `Doc::start_sync`, or a sync report about a NEWER stamp than that
+    /// peer's head. Callers that need it delivered sync explicitly; the rotation
+    /// runs offline and relies on the next start's join sync.
     pub async fn set_bytes_at(
         &self,
         doc: &Doc,

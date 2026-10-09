@@ -1235,7 +1235,8 @@ impl GuardianDBDocumentStore {
     ///
     /// The own-deletion-marker pre-check and its limits (D9), and the effect on
     /// this author's head in `latest_per_author` (may be lowered until the
-    /// author's next ordinary write): see `WillowDocs::set_bytes_at`.
+    /// author's next ordinary write) and on delivery to joined peers (not
+    /// gossiped, D10): see `WillowDocs::set_bytes_at`.
     pub async fn put_at(&self, document: Document, timestamp: u64) -> Result<Placed> {
         self.ensure_writable()?;
         let _entered = self.span.enter();

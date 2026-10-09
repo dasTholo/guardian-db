@@ -823,6 +823,11 @@ pub trait DocumentStore: Store {
     /// [`Self::put`] at a STATED entry timestamp instead of now (`SR` §3.2): the
     /// namespace migration's copy, which must never outrank what was written after
     /// the row it copies. See [`Placed`] for the rejected case.
+    ///
+    /// A stamped row is not gossiped (`SR` D10): it reaches peers that already
+    /// joined the namespace only with the next range sync (join, `start_sync`, or
+    /// a sync report about a newer stamp). Callers that need it delivered sync
+    /// explicitly; the rotation runs offline and relies on the next start's join.
     async fn put_at(&self, document: Document, timestamp: u64) -> Result<Placed, Self::Error>;
     /// Generates a (serialized) `DocTicket` that grants a peer access to synchronize this store.
     ///
