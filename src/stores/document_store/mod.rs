@@ -1487,14 +1487,23 @@ impl GuardianDBDocumentStore {
                 // `SR` §3.3: only the lossy scan steps over a missing blob.
                 // `SR` E13: only a blob the store does not hold (or holds
                 // incompletely) is missing content; any other read error — an
-                // uninitialised store, I/O mid-read — stays an error.
-                Err(e) => match missing.as_deref_mut() {
-                    Some(missing) if !self.blob_is_local(entry.content_hash()).await? => {
-                        missing.push(key);
-                        continue;
+                // uninitialised store, I/O mid-read — stays an error. When the
+                // check itself fails, the error carries both causes.
+                Err(e) => {
+                    let Some(missing) = missing.as_deref_mut() else {
+                        return Err(e);
+                    };
+                    match self.blob_is_local(entry.content_hash()).await {
+                        Ok(false) => {
+                            missing.push(key);
+                            continue;
+                        }
+                        Ok(true) => return Err(e),
+                        Err(check) => {
+                            return Err(GuardianError::Other(format!("{e}; {check}")));
+                        }
                     }
-                    _ => return Err(e),
-                },
+                }
             };
             let plaintext = self.decode_value(&key, stored)?;
             let document: Document = serde_json::from_slice(&plaintext).map_err(|e| {
