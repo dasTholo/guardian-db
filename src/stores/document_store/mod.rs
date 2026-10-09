@@ -1485,12 +1485,15 @@ impl GuardianDBDocumentStore {
             let stored = match self.client.cat_bytes(&hash_str).await {
                 Ok(stored) => stored,
                 // `SR` §3.3: only the lossy scan steps over a missing blob.
+                // `SR` E13: only a blob the store does not hold (or holds
+                // incompletely) is missing content; any other read error — an
+                // uninitialised store, I/O mid-read — stays an error.
                 Err(e) => match missing.as_deref_mut() {
-                    Some(missing) => {
+                    Some(missing) if !self.blob_is_local(entry.content_hash()).await? => {
                         missing.push(key);
                         continue;
                     }
-                    None => return Err(e),
+                    _ => return Err(e),
                 },
             };
             let plaintext = self.decode_value(&key, stored)?;
@@ -1505,6 +1508,18 @@ impl GuardianDBDocumentStore {
 
         debug!("SCAN prefix='{}' → {} documents via iroh-docs", prefix, out.len());
         Ok(out)
+    }
+
+    /// Whether the local blob store holds `hash` completely (the predicate of
+    /// `Node::missing_blobs`).
+    async fn blob_is_local(&self, hash: iroh_blobs::Hash) -> Result<bool> {
+        let store = self.client.backend().get_store_for_blobs().await?;
+        let store = store.read().await;
+        store
+            .blobs()
+            .has(hash)
+            .await
+            .map_err(|e| GuardianError::Other(format!("blob store: {e}")))
     }
 
     pub fn store_type(&self) -> &'static str {
