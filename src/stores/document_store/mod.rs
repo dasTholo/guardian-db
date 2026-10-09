@@ -1428,7 +1428,7 @@ impl GuardianDBDocumentStore {
     /// thing.
     pub async fn scan_docs(&self, prefix: &str) -> Result<Vec<Document>> {
         Ok(self
-            .scan_entries(prefix)
+            .scan_entries(prefix, None)
             .await?
             .into_iter()
             .map(|(document, _)| document)
@@ -1437,12 +1437,30 @@ impl GuardianDBDocumentStore {
 
     /// [`Self::scan_docs`] with each entry's timestamp (`SR` §3.2).
     pub async fn scan_docs_stamped(&self, prefix: &str) -> Result<Vec<(Document, u64)>> {
-        self.scan_entries(prefix).await
+        self.scan_entries(prefix, None).await
+    }
+
+    /// [`Self::scan_docs_stamped`], but an entry whose content no local blob holds
+    /// is SKIPPED and its key returned beside the documents (`SR` §3.3) — for
+    /// `rotate --leave-missing` alone. A document that does not decode is still an
+    /// error.
+    pub async fn scan_docs_stamped_lossy(
+        &self,
+        prefix: &str,
+    ) -> Result<(Vec<(Document, u64)>, Vec<String>)> {
+        let mut missing = Vec::new();
+        let found = self.scan_entries(prefix, Some(&mut missing)).await?;
+        Ok((found, missing))
     }
 
     /// The body of [`Self::scan_docs`]: every document under `prefix` with the
-    /// timestamp of the entry it was read from.
-    async fn scan_entries(&self, prefix: &str) -> Result<Vec<(Document, u64)>> {
+    /// timestamp of the entry it was read from. With `missing`, an entry whose
+    /// blob is not local is skipped and its key pushed there; without, it fails.
+    async fn scan_entries(
+        &self,
+        prefix: &str,
+        mut missing: Option<&mut Vec<String>>,
+    ) -> Result<Vec<(Document, u64)>> {
         let _entered = self.span.enter();
 
         // `key_prefix` on the SingleLatestPerKey builder and not the other way
@@ -1464,7 +1482,17 @@ impl GuardianDBDocumentStore {
             }
             let key = String::from_utf8_lossy(entry.key()).to_string();
             let hash_str = entry.content_hash().to_hex();
-            let stored = self.client.cat_bytes(&hash_str).await?;
+            let stored = match self.client.cat_bytes(&hash_str).await {
+                Ok(stored) => stored,
+                // `SR` §3.3: only the lossy scan steps over a missing blob.
+                Err(e) => match missing.as_deref_mut() {
+                    Some(missing) => {
+                        missing.push(key);
+                        continue;
+                    }
+                    None => return Err(e),
+                },
+            };
             let plaintext = self.decode_value(&key, stored)?;
             let document: Document = serde_json::from_slice(&plaintext).map_err(|e| {
                 GuardianError::Serialization(format!(

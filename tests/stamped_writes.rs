@@ -4,6 +4,7 @@
 use guardian_db::guardian::error::GuardianError;
 use guardian_db::p2p::network::core::docs::WillowDocs;
 use guardian_db::traits::{DocumentStore, Placed};
+use iroh_blobs::Hash;
 use iroh_docs::DocTicket;
 use iroh_docs::store::Query;
 mod common;
@@ -165,4 +166,27 @@ async fn a_written_copy_that_is_not_the_latest_leaves_the_index_on_the_newer_row
     let rows = stamped(&docs, "k/").await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!((rows[0].1.as_str(), rows[0].2 > 1), ("newer", true), "{rows:?}");
+}
+
+/// `SR` §3.3: the lossy scan skips an entry whose blob is not local and names
+/// its key; the strict one fails on it.
+#[tokio::test]
+async fn the_lossy_stamped_scan_names_an_entry_without_its_blob_and_keeps_the_rest() {
+    let node = TestNode::new("stamped-lossy").await.unwrap();
+    let docs = node.db.docs("stamped-lossy", None).await.unwrap();
+    docs.put(row("m/kept", "kept")).await.unwrap();
+    let (doc, author) = own_document(&node, &docs).await;
+    let never_stored = b"content this node never held";
+    doc.set_hash(
+        author,
+        b"m/gone".to_vec(),
+        Hash::new(never_stored),
+        never_stored.len() as u64,
+    )
+    .await
+    .unwrap();
+    assert!(docs.scan_docs_stamped("m/").await.is_err(), "strict stays strict");
+    let (rows, missing) = docs.scan_docs_stamped_lossy("m/").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(missing, vec!["m/gone".to_owned()]);
 }

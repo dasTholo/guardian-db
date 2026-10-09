@@ -1515,6 +1515,30 @@ impl DocumentStore for DocumentStoreWrapper {
             .collect())
     }
 
+    async fn scan_docs_stamped_lossy(
+        &self,
+        prefix: &str,
+    ) -> std::result::Result<(Vec<(Document, u64)>, Vec<String>), Self::Error> {
+        // The downcast of `scan_docs`, for the same reason.
+        let (values, missing) = self
+            .store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "scan_docs_stamped_lossy: underlying store is not a GuardianDBDocumentStore"
+                        .to_string(),
+                )
+            })?
+            .scan_docs_stamped_lossy(prefix)
+            .await?;
+        let values = values
+            .into_iter()
+            .map(|(v, ts)| (Box::new(v) as Document, ts))
+            .collect();
+        Ok((values, missing))
+    }
+
     async fn put_at(
         &self,
         document: Document,

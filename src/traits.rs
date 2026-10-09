@@ -820,6 +820,13 @@ pub trait DocumentStore: Store {
     /// microseconds since the epoch — for a copy that must keep it (`SR` §3.2).
     async fn scan_docs_stamped(&self, prefix: &str) -> Result<Vec<(Document, u64)>, Self::Error>;
 
+    /// [`Self::scan_docs_stamped`], stepping over an entry whose content is not
+    /// local and naming its key (`SR` §3.3).
+    async fn scan_docs_stamped_lossy(
+        &self,
+        prefix: &str,
+    ) -> Result<(Vec<(Document, u64)>, Vec<String>), Self::Error>;
+
     /// [`Self::put`] at a STATED entry timestamp instead of now (`SR` §3.2): the
     /// namespace migration's copy, which must never outrank what was written after
     /// the row it copies. See [`Placed`] for the rejected case.
