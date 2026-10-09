@@ -208,6 +208,11 @@ async fn an_explicit_sync_brings_stamped_rows_to_a_joined_peer() {
     p.doc_b.start_sync(vec![addr]).await.unwrap();
     assert!(wait_holds(&p.b, &p.doc_b, "k/high", DEADLINE).await, "k/high after start_sync");
     assert!(wait_holds(&p.b, &p.doc_b, "k/low", DEADLINE).await, "k/low after start_sync");
+    assert_eq!(
+        entries(&p.b, &p.doc_b, "k/").await,
+        vec![("k/high".to_string(), base + 1000), ("k/low".to_string(), base + 500)],
+        "the rows arrive with their stamps"
+    );
 }
 
 /// Three nodes in one namespace for the `SyncReport` path (`live.rs`
@@ -257,8 +262,9 @@ async fn trio(name: &str) -> Trio {
 /// B's head for A's author is that stamp. A then writes `k/second` at
 /// `base + second_ts_offset` and C pulls it — C's finished sync broadcasts a
 /// `SyncReport` with the stamp of what it received. Returns whether B, which
-/// only hears that report, got the row within `window`.
-async fn report_reaches_b(name: &str, second_ts_offset: u64, window: Duration) -> bool {
+/// only hears that report, got the row within `window`, and whether B's head
+/// was below the reported stamp (the mechanism: the report has news for B).
+async fn report_reaches_b(name: &str, second_ts_offset: u64, window: Duration) -> (bool, bool) {
     let t = trio(name).await;
     let base = now_micros() - 3_600_000_000;
     let ns = t.doc_a.id();
@@ -274,25 +280,40 @@ async fn report_reaches_b(name: &str, second_ts_offset: u64, window: Duration) -
         t.docs_a.put_at(row("k/second", "y"), base + second_ts_offset).await.unwrap(),
         Placed::Written
     );
-    eprintln!(
-        "[d10] report: second at base+{second_ts_offset}; B head below it? {}",
-        head_below(&t.b, ns, author, base + second_ts_offset).await
-    );
+    let head_below_report = head_below(&t.b, ns, author, base + second_ts_offset).await;
+    eprintln!("[d10] report: second at base+{second_ts_offset}; B head below it? {head_below_report}");
     t.doc_c.start_sync(vec![addr_a]).await.unwrap();
     assert!(wait_holds(&t.c, &t.doc_c, "k/second", DEADLINE).await, "C pulls the second row");
-    wait_holds(&t.b, &t.doc_b, "k/second", window).await
+    assert!(
+        entries(&t.c, &t.doc_c, "k/").await.contains(&("k/second".to_string(), base + second_ts_offset)),
+        "C holds the second row with its stamp"
+    );
+    let arrived = wait_holds(&t.b, &t.doc_b, "k/second", window).await;
+    if arrived {
+        assert!(
+            entries(&t.b, &t.doc_b, "k/")
+                .await
+                .contains(&("k/second".to_string(), base + second_ts_offset)),
+            "B holds the second row with its stamp"
+        );
+    }
+    (arrived, head_below_report)
 }
 
 /// The second row is stamped HIGHER than what B holds: C's sync report has
 /// news for B, and B syncs.
 #[tokio::test]
 async fn a_sync_report_brings_a_higher_stamp_to_a_third_peer() {
-    assert!(report_reaches_b("d10-report-higher", 2000, DEADLINE).await);
+    let (arrived, head_below_report) = report_reaches_b("d10-report-higher", 2000, DEADLINE).await;
+    assert!(head_below_report, "B's head is below the reported stamp: the report has news");
+    assert!(arrived);
 }
 
 /// The second row is stamped LOWER than what B holds: the report has no news
 /// for B (`has_news_for_us`), so B never syncs and never gets the row.
 #[tokio::test]
 async fn a_sync_report_does_not_bring_a_stamp_below_the_peers_head() {
-    assert!(!report_reaches_b("d10-report-lower", 500, ABSENCE).await);
+    let (arrived, head_below_report) = report_reaches_b("d10-report-lower", 500, ABSENCE).await;
+    assert!(!head_below_report, "B's head is not below the reported stamp: no news for B");
+    assert!(!arrived);
 }

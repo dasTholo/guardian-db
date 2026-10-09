@@ -323,9 +323,12 @@ impl WillowDocs {
     ///
     /// The entry goes in through `SyncHandle::insert_remote` with this node as
     /// `from` — the one public path that takes a signed entry as given. So it is
-    /// NOT gossiped (only local inserts are); it travels with the next range sync,
-    /// and the replica must be open and syncing (`DocumentStore::new` starts it).
-    /// A rejection because this author already holds an entry at the key or a
+    /// NOT gossiped (only local inserts are), and the replica must be open and
+    /// syncing (`DocumentStore::new` starts it). Delivery (`SR` D10): a peer that
+    /// has already joined the namespace gets the row only with the next range
+    /// sync — a join, `Doc::start_sync`, or a sync report about a NEWER stamp
+    /// than that peer's head. Callers that need it delivered sync explicitly; the
+    /// rotation runs offline and relies on the next start's join sync. A rejection because this author already holds an entry at the key or a
     /// prefix of it that is not older is `Ok(Placed::Superseded)`, not an error.
     ///
     /// D9 (`SR` Task 7): iroh-docs 0.101 does NOT see deletion markers in that
@@ -341,13 +344,8 @@ impl WillowDocs {
     /// Known effect: the insert sets this author's head in iroh-docs'
     /// `latest_per_author` to `timestamp` unconditionally, so it may lower the
     /// author's head until the author's next ordinary write. A lowered head only
-    /// makes syncs more likely (measured, `tests/stamped_head.rs`); it blocks none.
-    ///
-    /// Delivery (`SR` D10): a stamped row is not gossiped. A peer that has
-    /// already joined the namespace gets it only with the next range sync — a
-    /// join, `Doc::start_sync`, or a sync report about a NEWER stamp than that
-    /// peer's head. Callers that need it delivered sync explicitly; the rotation
-    /// runs offline and relies on the next start's join sync.
+    /// makes syncs more likely; it blocks none. The only reader of
+    /// `latest_per_author` is `has_news_for_us` (iroh-docs 0.101 `store/fs.rs`:323).
     pub async fn set_bytes_at(
         &self,
         doc: &Doc,
