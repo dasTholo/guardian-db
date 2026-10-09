@@ -829,6 +829,7 @@ pub trait DocumentStore: Store {
     /// a sync report about a newer stamp). Callers that need it delivered sync
     /// explicitly; the rotation runs offline and relies on the next start's join.
     async fn put_at(&self, document: Document, timestamp: u64) -> Result<Placed, Self::Error>;
+
     /// Generates a (serialized) `DocTicket` that grants a peer access to synchronize this store.
     ///
     /// Replication capability: the peer must open the store passing the ticket in

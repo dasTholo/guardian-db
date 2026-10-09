@@ -132,3 +132,37 @@ async fn an_old_timestamp_deletes_less_under_its_prefix_never_more() {
     let keys: Vec<String> = stamped(&docs, "p/").await.into_iter().map(|(k, _, _)| k).collect();
     assert_eq!(keys, vec!["p/".to_owned(), "p/y".to_owned()], "p/x (5) went, p/y (now) stayed");
 }
+
+/// The value the store's index holds under `key`, as text.
+fn indexed(docs: &std::sync::Arc<dyn DocumentStore<Error = GuardianError>>, key: &str) -> String {
+    let held = docs.index().get_bytes(key).unwrap().expect("the key is in the index");
+    String::from_utf8_lossy(&held).into_owned()
+}
+
+/// D5, the other branch, through the STORE (`put_at`, not `WillowDocs`): a copy
+/// that is `Written` but not the latest at its key — another author holds a
+/// newer row — leaves the index on that newer row, as the document does.
+#[tokio::test]
+async fn a_written_copy_that_is_not_the_latest_leaves_the_index_on_the_newer_row() {
+    let node = TestNode::new("stamped-index").await.unwrap();
+    let docs = node.db.docs("stamped-index", None).await.unwrap();
+    let (doc, _) = own_document(&node, &docs).await;
+    let willow = WillowDocs::new(node.iroh.backend().clone()).await.unwrap();
+    let other = willow.docs().author_create().await.unwrap();
+    let newer = serde_json::to_vec(&json!({ "_id": "k/x", "v": "newer" })).unwrap();
+    willow.set_bytes(&doc, other, b"k/x".to_vec(), newer).await.unwrap();
+    docs.load(0).await.unwrap();
+    assert!(
+        indexed(&docs, "k/x").contains("newer"),
+        "green first: the index holds the other author's row"
+    );
+
+    assert_eq!(docs.put_at(row("k/x", "older"), 1).await.unwrap(), Placed::Written);
+    assert!(
+        indexed(&docs, "k/x").contains("newer"),
+        "a copy that is not the latest never takes the index"
+    );
+    let rows = stamped(&docs, "k/").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].1.as_str(), rows[0].2 > 1), ("newer", true), "{rows:?}");
+}
