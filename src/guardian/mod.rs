@@ -1491,6 +1491,53 @@ impl DocumentStore for DocumentStoreWrapper {
         // `get_all_documents_from_index` makes.
         Ok(values.into_iter().map(|v| Box::new(v) as Document).collect())
     }
+
+    async fn scan_docs_stamped(
+        &self,
+        prefix: &str,
+    ) -> std::result::Result<Vec<(Document, u64)>, Self::Error> {
+        // The downcast of `scan_docs`, for the same reason.
+        let values = self
+            .store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "scan_docs_stamped: underlying store is not a GuardianDBDocumentStore"
+                        .to_string(),
+                )
+            })?
+            .scan_docs_stamped(prefix)
+            .await?;
+        Ok(values
+            .into_iter()
+            .map(|(v, ts)| (Box::new(v) as Document, ts))
+            .collect())
+    }
+
+    async fn put_at(
+        &self,
+        document: Document,
+        timestamp: u64,
+    ) -> std::result::Result<crate::traits::Placed, Self::Error> {
+        // The write is defined on the iroh-docs document, so the same downcast
+        // as `scan_docs`; the concrete store takes a JSON value.
+        let store = self
+            .store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "put_at: underlying store is not a GuardianDBDocumentStore".to_string(),
+                )
+            })?;
+        let value = document.downcast::<serde_json::Value>().map_err(|_| {
+            GuardianError::Store(
+                "put_at: only a JSON document can be written at a timestamp".to_string(),
+            )
+        })?;
+        store.put_at(*value, timestamp).await
+    }
 }
 
 #[async_trait::async_trait]

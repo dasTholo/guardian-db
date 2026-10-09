@@ -4,8 +4,10 @@
 /// enabling distributed key-value storage with automatic synchronization
 /// and Last-Write-Wins conflict resolution.
 use crate::guardian::error::{GuardianError, Result};
+use crate::traits::Placed;
 use bytes::Bytes;
 use iroh_docs::{AuthorId, NamespaceId, api::Doc, protocol::Docs, store::Query, sync::Entry};
+use iroh_docs::{ContentStatus, InsertError, Record, RecordIdentifier};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -25,6 +27,9 @@ pub struct WillowDocs {
     /// handed in at `Docs::spawn` (`IrohBackend::initialize_node`). Held here so
     /// [`Self::set_bytes`] can make a value durable before its entry exists.
     blobs: iroh_blobs::api::Store,
+    /// The docs engine's `SyncHandle` (`IrohBackend::get_sync`): the path that
+    /// takes a signed entry as given, for [`Self::set_bytes_at`].
+    sync: iroh_docs::actor::SyncHandle,
     /// Default author used for all write operations.
     default_author: Option<AuthorId>,
 }
@@ -47,10 +52,18 @@ impl WillowDocs {
             .clone();
         drop(docs_lock);
         let blobs = backend.get_store_for_blobs().await?.read().await.as_ref().clone();
+        let sync_lock_guard = backend.get_sync().await?;
+        let sync = sync_lock_guard
+            .read()
+            .await
+            .as_ref()
+            .ok_or_else(|| GuardianError::Other("Docs not initialized in the backend".into()))?
+            .clone();
 
         Ok(Self {
             docs: Arc::new(docs),
             blobs,
+            sync,
             default_author: None,
         })
     }
@@ -302,6 +315,101 @@ impl WillowDocs {
         drop(tag);
         debug!("Set bytes in document {:?}: hash={:?}", doc.id(), hash);
         Ok(hash)
+    }
+
+    /// [`Self::set_bytes`] with a STATED timestamp instead of now (`SR` §3.2): the
+    /// namespace migration copies a row with the timestamp of its entry in the old
+    /// namespace, so a copy never outranks what a device wrote later.
+    ///
+    /// The entry goes in through `SyncHandle::insert_remote` with this node as
+    /// `from` — the one public path that takes a signed entry as given. So it is
+    /// NOT gossiped (only local inserts are); it travels with the next range sync,
+    /// and the replica must be open and syncing (`DocumentStore::new` starts it).
+    /// A rejection because this author already holds an entry at the key or a
+    /// prefix of it that is not older is `Ok(Placed::Superseded)`, not an error.
+    ///
+    /// D9 (`SR` Task 7): iroh-docs 0.101 does NOT see deletion markers in that
+    /// check — `ranger::Store::put` walks the parents with `include_empty =
+    /// false`, and `entry_put` then overwrites the record of the same id, so an
+    /// old copy would bring a row back that this author deleted later. Hence
+    /// the pre-check below: this author's entry at the EXACT key, empty ones
+    /// included; one at or after `timestamp` is `Superseded` and nothing is
+    /// written. Two limits, named: a deletion marker on a proper PREFIX of the
+    /// key is not covered, and the check is not atomic — an own deletion of the
+    /// same key between the check and the insert is still overwritten.
+    ///
+    /// Known effect: the insert sets this author's head in iroh-docs'
+    /// `latest_per_author` to `timestamp` unconditionally, so it may lower the
+    /// author's head until the author's next ordinary write.
+    pub async fn set_bytes_at(
+        &self,
+        doc: &Doc,
+        author_id: AuthorId,
+        key: impl Into<Bytes>,
+        value: impl Into<Bytes>,
+        timestamp: u64,
+        own_node: [u8; 32],
+    ) -> Result<Placed> {
+        use futures::TryStreamExt;
+        let failed = |step: &str, e: &dyn std::fmt::Debug| {
+            error!("Failed to set bytes at a timestamp ({step}): {:?}", e);
+            GuardianError::Storage(format!("Failed to set bytes at a timestamp ({step}): {:?}", e))
+        };
+        let key: Bytes = key.into();
+        // D9: an own entry at the exact key, a deletion marker included.
+        let own: Vec<Entry> = doc
+            .get_many(Query::author(author_id).key_exact(&key).include_empty())
+            .await
+            .map_err(|e| failed("read own entry", &e))?
+            .try_collect()
+            .await
+            .map_err(|e| failed("read own entry", &e))?;
+        if own.iter().any(|e| e.timestamp() >= timestamp) {
+            return Ok(Placed::Superseded);
+        }
+        let value: Bytes = value.into();
+        let size = value.len() as u64;
+        let tag = self
+            .blobs
+            .add_bytes(value)
+            .temp_tag()
+            .await
+            .map_err(|e| failed("add blob", &e))?;
+        let hash = tag.hash();
+        self.blobs
+            .sync_db()
+            .await
+            .map_err(|e| failed("commit blob", &e))?;
+        let namespace = doc.id();
+        let author = self
+            .docs
+            .author_export(author_id)
+            .await
+            .map_err(|e| failed("export author", &e))?
+            .ok_or_else(|| failed("export author", &"author not in this node's store"))?;
+        let secret = self
+            .sync
+            .export_secret_key(namespace)
+            .await
+            .map_err(|e| failed("export namespace secret", &e))?;
+        let entry = Entry::new(
+            RecordIdentifier::new(namespace, author_id, &key),
+            Record::new(hash, size, timestamp),
+        )
+        .sign(&secret, &author);
+        let placed = match self
+            .sync
+            .insert_remote(namespace, entry, own_node, ContentStatus::Complete)
+            .await
+        {
+            Ok(()) => Placed::Written,
+            Err(e) if matches!(e.downcast_ref::<InsertError>(), Some(InsertError::NewerEntryExists)) => {
+                Placed::Superseded
+            }
+            Err(e) => return Err(failed("insert entry", &e)),
+        };
+        drop(tag);
+        Ok(placed)
     }
 
     /// Removes a key from a document.

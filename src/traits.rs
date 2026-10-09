@@ -757,6 +757,17 @@ pub struct DocumentStoreQueryOptions {
     pub sort: Option<String>,
 }
 
+/// What a write at a stated entry timestamp did ([`DocumentStore::put_at`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placed {
+    /// The entry stands.
+    Written,
+    /// This store's own author already holds an entry at the key, or at a
+    /// prefix of it, that is not older; nothing was written. The newer state
+    /// is the right one, so this is no error (`SR` §3.2).
+    Superseded,
+}
+
 /// A store that handles documents (semi-structured objects).
 ///
 /// This trait combines basic store functionality with document-specific
@@ -804,6 +815,15 @@ pub trait DocumentStore: Store {
     /// cost and its callers; this one touches the index in neither direction —
     /// it does not read it and it does not fill it.
     async fn scan_docs(&self, prefix: &str) -> Result<Vec<Document>, Self::Error>;
+
+    /// [`Self::scan_docs`] with the timestamp of each document's entry, in
+    /// microseconds since the epoch — for a copy that must keep it (`SR` §3.2).
+    async fn scan_docs_stamped(&self, prefix: &str) -> Result<Vec<(Document, u64)>, Self::Error>;
+
+    /// [`Self::put`] at a STATED entry timestamp instead of now (`SR` §3.2): the
+    /// namespace migration's copy, which must never outrank what was written after
+    /// the row it copies. See [`Placed`] for the rejected case.
+    async fn put_at(&self, document: Document, timestamp: u64) -> Result<Placed, Self::Error>;
     /// Generates a (serialized) `DocTicket` that grants a peer access to synchronize this store.
     ///
     /// Replication capability: the peer must open the store passing the ticket in

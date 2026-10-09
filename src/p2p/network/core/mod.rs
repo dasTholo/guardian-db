@@ -155,6 +155,9 @@ pub struct IrohBackend {
     gossip: Arc<RwLock<Option<Gossip>>>,
     /// Docs protocol instance for the distributed KV store.
     docs: Arc<RwLock<Option<Docs>>>,
+    /// The docs engine's `SyncHandle`, set beside `docs` in `initialize_node`:
+    /// the one path that inserts an entry with a stated timestamp (`SR` §3.2).
+    sync: Arc<RwLock<Option<iroh_docs::actor::SyncHandle>>>,
     /// Router for protocol multiplexing via ALPN.
     router: Arc<RwLock<Option<Router>>>,
     /// Node secret key.
@@ -454,6 +457,7 @@ impl IrohBackend {
             store: Arc::new(RwLock::new(None)),
             gossip: Arc::new(RwLock::new(None)),
             docs: Arc::new(RwLock::new(None)),
+            sync: Arc::new(RwLock::new(None)),
             router: Arc::new(RwLock::new(None)),
             secret_key,
             metrics: Arc::new(RwLock::new(BackendMetrics {
@@ -697,11 +701,27 @@ impl IrohBackend {
         };
         drop(store_lock);
 
-        // Create Docs using the Builder pattern.
-        let docs = Docs::persistent(docs_dir)
-            .spawn(endpoint.clone(), blobs_store, gossip.clone())
-            .await
-            .map_err(|e| GuardianError::Other(format!("Error initializing Docs: {}", e)))?;
+        // Built by hand rather than through `Docs::persistent(..).spawn(..)`: the
+        // builder keeps the `Engine` private, and `WillowDocs::set_bytes_at` needs
+        // its `SyncHandle` to insert an entry with a stated timestamp (`SR` §3.2).
+        // The body is the builder's own (iroh-docs 0.101 `protocol.rs`), file names
+        // included, so an existing store opens as before.
+        let replica_store = iroh_docs::store::Store::persistent(docs_dir.join("docs.redb"))
+            .map_err(|e| GuardianError::Other(format!("Error opening the docs store: {}", e)))?;
+        let downloader = blobs_store.downloader(&endpoint);
+        let engine = iroh_docs::engine::Engine::spawn(
+            endpoint.clone(),
+            gossip.clone(),
+            replica_store,
+            blobs_store,
+            downloader,
+            iroh_docs::engine::DefaultAuthorStorage::Persistent(docs_dir.join("default-author")),
+            None,
+        )
+        .await
+        .map_err(|e| GuardianError::Other(format!("Error initializing Docs: {}", e)))?;
+        *self.sync.write().await = Some(engine.sync.clone());
+        let docs = Docs::new(engine);
 
         // Store Docs.
         {
@@ -1146,6 +1166,17 @@ impl IrohBackend {
             return Err(GuardianError::Other("Docs not initialized".to_string()));
         }
         Ok(self.docs.clone())
+    }
+
+    /// Returns the docs engine's `SyncHandle` if available — the shape of
+    /// [`Self::get_docs`]. `WillowDocs::set_bytes_at` inserts through it.
+    pub async fn get_sync(&self) -> Result<Arc<RwLock<Option<iroh_docs::actor::SyncHandle>>>> {
+        let sync_lock = self.sync.read().await;
+        if sync_lock.is_none() {
+            drop(sync_lock);
+            return Err(GuardianError::Other("Docs not initialized".to_string()));
+        }
+        Ok(self.sync.clone())
     }
 
     /// Actively discovers peers using the Discovery trait's subscribe().

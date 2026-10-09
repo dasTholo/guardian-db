@@ -12,7 +12,7 @@ use crate::p2p::network::core::docs::WillowDocs;
 use crate::stores::operation::Operation;
 use crate::stores::payload_codec::{RecordCtx, SharedPayloadCodec, codec_or_identity};
 use crate::traits::{
-    CreateDocumentDBOptions, DocumentStoreGetOptions, NewStoreOptions, Store, StoreIndex,
+    CreateDocumentDBOptions, DocumentStoreGetOptions, NewStoreOptions, Placed, Store, StoreIndex,
     TracerWrapper,
 };
 use bytes::Bytes;
@@ -682,10 +682,14 @@ impl GuardianDBDocumentStore {
 
             use futures::StreamExt;
             use iroh_docs::engine::LiveEvent;
+            let own = client.node_id();
             while let Some(event) = stream.next().await {
                 // Rebuild the index ONLY on REMOTE-origin events (peer sync).
                 // Local writes update the index directly (`put_impl`), so
-                // rebuilding on them would be pure waste.
+                // rebuilding on them would be pure waste. An `InsertRemote` from
+                // THIS node is a `put_at` of this store (`SR` §3.2), already in
+                // the index — rebuilding on it would cost a full refresh per
+                // copied row, O(N²) over a `rotate`.
                 //
                 // THIS DOES NOT AVOID THE RACE WITH A LOCAL WRITE, and the
                 // line here used to claim it did. A remote event can arrive
@@ -695,13 +699,14 @@ impl GuardianDBDocumentStore {
                 // `put_impl`/`del` or a rebuild lock; both were on the table
                 // for `LI` and both were declined as a second, separate
                 // decision (`LI §0.5`, `§7`).
-                let is_remote = matches!(
-                    event,
-                    Ok(LiveEvent::InsertRemote { .. })
-                        | Ok(LiveEvent::ContentReady { .. })
-                        | Ok(LiveEvent::PendingContentReady)
-                        | Ok(LiveEvent::SyncFinished(_))
-                );
+                let is_remote = match &event {
+                    // `SR` §3.2: our own stamped writes come back as remote inserts.
+                    Ok(LiveEvent::InsertRemote { from, .. }) => *from != own,
+                    Ok(LiveEvent::ContentReady { .. })
+                    | Ok(LiveEvent::PendingContentReady)
+                    | Ok(LiveEvent::SyncFinished(_)) => true,
+                    _ => false,
+                };
                 if is_remote && let Err(e) = refresh_doc_index(&docs, &doc, &client, &index).await {
                     warn!("Failed to update Document index via live sync: {:?}", e);
                 }
@@ -1221,6 +1226,55 @@ impl GuardianDBDocumentStore {
         Ok(Operation::new(Some(key), "PUT".to_string(), Some(data)))
     }
 
+    /// [`Self::put_impl`] at a STATED entry timestamp (`SR` §3.2).
+    ///
+    /// The index takes the value only when this entry is now the latest at its
+    /// key: the copy writes rows OLDER than now, and another author's newer entry
+    /// — a deletion marker the copy's absent-check cannot see — must keep winning
+    /// in the index as it does in the document.
+    ///
+    /// The own-deletion-marker pre-check and its limits (D9), and the effect on
+    /// this author's head in `latest_per_author` (may be lowered until the
+    /// author's next ordinary write): see `WillowDocs::set_bytes_at`.
+    pub async fn put_at(&self, document: Document, timestamp: u64) -> Result<Placed> {
+        self.ensure_writable()?;
+        let _entered = self.span.enter();
+        let key = (self.doc_opts.key_extractor)(&document)?;
+        let data = (self.doc_opts.marshal)(&document)?;
+        let stored = self.encode_value(&key, data)?;
+        let own = *self.client.node_id().as_bytes();
+        let placed = self
+            .docs
+            .set_bytes_at(
+                &self.doc_handle,
+                self.author_id,
+                Bytes::from(key.clone().into_bytes()),
+                Bytes::from(stored.clone()),
+                timestamp,
+                own,
+            )
+            .await
+            .map_err(|e| {
+                GuardianError::Store(format!("Error writing key '{}' to iroh-docs: {}", key, e))
+            })?;
+        if placed == Placed::Written {
+            let latest = self
+                .docs
+                .get_many(
+                    &self.doc_handle,
+                    Query::single_latest_per_key().key_exact(key.as_bytes()),
+                )
+                .await?;
+            if latest
+                .first()
+                .is_some_and(|e| e.author() == self.author_id && e.timestamp() == timestamp)
+            {
+                self.index.insert(key, stored);
+            }
+        }
+        Ok(placed)
+    }
+
     /// `&self` variant of [`delete`](Self::delete). See [`put_impl`](Self::put_impl).
     #[instrument(level = "debug", skip(self))]
     pub async fn delete_impl(&self, document_id: &str) -> Result<Operation> {
@@ -1372,6 +1426,22 @@ impl GuardianDBDocumentStore {
     /// deletion marker and not an unreadable entry, and the two are not the same
     /// thing.
     pub async fn scan_docs(&self, prefix: &str) -> Result<Vec<Document>> {
+        Ok(self
+            .scan_entries(prefix)
+            .await?
+            .into_iter()
+            .map(|(document, _)| document)
+            .collect())
+    }
+
+    /// [`Self::scan_docs`] with each entry's timestamp (`SR` §3.2).
+    pub async fn scan_docs_stamped(&self, prefix: &str) -> Result<Vec<(Document, u64)>> {
+        self.scan_entries(prefix).await
+    }
+
+    /// The body of [`Self::scan_docs`]: every document under `prefix` with the
+    /// timestamp of the entry it was read from.
+    async fn scan_entries(&self, prefix: &str) -> Result<Vec<(Document, u64)>> {
         let _entered = self.span.enter();
 
         // `key_prefix` on the SingleLatestPerKey builder and not the other way
@@ -1401,7 +1471,7 @@ impl GuardianDBDocumentStore {
                     key, e
                 ))
             })?;
-            out.push(document);
+            out.push((document, entry.timestamp()));
         }
 
         debug!("SCAN prefix='{}' → {} documents via iroh-docs", prefix, out.len());
