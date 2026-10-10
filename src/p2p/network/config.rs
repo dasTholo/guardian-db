@@ -211,9 +211,10 @@ impl ClientConfig {
         self.data_store_path.is_some()
     }
 
-    /// Returns whether any discovery method is enabled.
+    /// Returns whether any address lookup is enabled: n0, mDNS, or this network's own
+    /// pkarr service (`RN`).
     pub fn has_discovery_enabled(&self) -> bool {
-        self.enable_discovery_n0 || self.enable_discovery_mdns
+        self.enable_discovery_n0 || self.enable_discovery_mdns || self.pkarr_url.is_some()
     }
 }
 
@@ -566,6 +567,13 @@ mod tests {
         // Without discovery.
         let without_discovery = ClientConfig::offline();
         assert!(!without_discovery.has_discovery_enabled());
+
+        // `RN`: a pkarr lookup service is an address lookup of its own, mDNS or not.
+        let with_pkarr = ClientConfig {
+            pkarr_url: Some("https://dns.example.org/pkarr".parse().unwrap()),
+            ..ClientConfig::offline()
+        };
+        assert!(with_pkarr.has_discovery_enabled());
     }
 
     /// `RN` §2: the token never reaches a `Debug` line.

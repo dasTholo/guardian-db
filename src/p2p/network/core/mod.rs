@@ -848,13 +848,17 @@ impl IrohBackend {
         }
 
         // Address lookup follows `ClientConfig`: `enable_discovery_n0` picks the
-        // endpoint preset and `enable_discovery_mdns` decides the LAN lookup
+        // endpoint preset, `enable_discovery_mdns` decides the LAN lookup and
+        // `pkarr_url` names this network's own lookup service beside its `relays`
         // (`initialize_node` above). A node built from `testing()` resolves
         // nothing and must be handed addresses — see `Endpoint::add_node_addr`.
         if self.config.has_discovery_enabled() {
             info!(
-                "Iroh backend initialized; address lookup: n0={} mdns={}",
-                self.config.enable_discovery_n0, self.config.enable_discovery_mdns
+                "Iroh backend initialized; address lookup: n0={} mdns={} relays={} pkarr={}",
+                self.config.enable_discovery_n0,
+                self.config.enable_discovery_mdns,
+                self.config.relays.len(),
+                self.config.pkarr_url.is_some()
             );
         } else {
             info!("Iroh backend initialized with NO address lookup — peers must be stated by address");
