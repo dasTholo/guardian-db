@@ -827,6 +827,12 @@ pub trait DocumentStore: Store {
         prefix: &str,
     ) -> Result<(Vec<(Document, u64)>, Vec<String>), Self::Error>;
 
+    /// The timestamp of the newest entry at exactly `key`, over all authors — a
+    /// deletion marker and an entry whose content is not local included — or
+    /// `None` when the key holds no entry (`SRN` N1). Reads no content: it says
+    /// when the entry was written, not what it holds.
+    async fn latest_stamp_at(&self, key: &str) -> Result<Option<u64>, Self::Error>;
+
     /// [`Self::put`] at a STATED entry timestamp instead of now (`SR` §3.2): the
     /// namespace migration's copy, which must never outrank what was written after
     /// the row it copies. See [`Placed`] for the rejected case.

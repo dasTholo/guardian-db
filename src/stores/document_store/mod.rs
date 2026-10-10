@@ -1453,6 +1453,27 @@ impl GuardianDBDocumentStore {
         Ok((found, missing))
     }
 
+    /// The trait method of the same name, on the concrete store: the newest entry
+    /// at exactly `key` over all authors, empty ones included, and its timestamp.
+    /// For the rotation's claim stamp — one microsecond above whatever stands at
+    /// the claim key (`SR` D11, `SRN` N1) — which an entry without a local blob or
+    /// a deletion marker must not hide. No `cat_bytes`: nothing here checks the
+    /// content.
+    pub async fn latest_stamp_at(&self, key: &str) -> Result<Option<u64>> {
+        let _entered = self.span.enter();
+        let entries = self
+            .docs
+            .get_many(
+                &self.doc_handle,
+                Query::single_latest_per_key()
+                    .key_exact(key.as_bytes())
+                    .include_empty()
+                    .build(),
+            )
+            .await?;
+        Ok(entries.iter().map(|e| e.timestamp()).max())
+    }
+
     /// The body of [`Self::scan_docs`]: every document under `prefix` with the
     /// timestamp of the entry it was read from. With `missing`, an entry whose
     /// blob is not local is skipped and its key pushed there; without, it fails.
@@ -1488,7 +1509,9 @@ impl GuardianDBDocumentStore {
                 // `SR` E13: only a blob the store does not hold (or holds
                 // incompletely) is missing content; any other read error — an
                 // uninitialised store, I/O mid-read — stays an error. When the
-                // check itself fails, the error carries both causes.
+                // check itself fails, the error carries both causes. `SRN` N5: a
+                // held blob that does not read is named, key and cause, and stays
+                // an error under the flag.
                 Err(e) => {
                     let Some(missing) = missing.as_deref_mut() else {
                         return Err(e);
@@ -1498,7 +1521,13 @@ impl GuardianDBDocumentStore {
                             missing.push(key);
                             continue;
                         }
-                        Ok(true) => return Err(e),
+                        Ok(true) => {
+                            return Err(GuardianError::Other(format!(
+                                "the blob of '{key}' is held but cannot be read: {e} \
+                                 (`--leave-missing` covers content that is missing, \
+                                 not content that is unreadable)"
+                            )));
+                        }
                         Err(check) => {
                             return Err(GuardianError::Other(format!("{e}; {check}")));
                         }

@@ -1539,6 +1539,20 @@ impl DocumentStore for DocumentStoreWrapper {
         Ok((values, missing))
     }
 
+    async fn latest_stamp_at(&self, key: &str) -> std::result::Result<Option<u64>, Self::Error> {
+        // The downcast of `scan_docs`, for the same reason.
+        self.store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "latest_stamp_at: underlying store is not a GuardianDBDocumentStore".to_string(),
+                )
+            })?
+            .latest_stamp_at(key)
+            .await
+    }
+
     async fn put_at(
         &self,
         document: Document,

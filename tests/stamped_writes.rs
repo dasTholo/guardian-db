@@ -190,3 +190,70 @@ async fn the_lossy_stamped_scan_names_an_entry_without_its_blob_and_keeps_the_re
     assert_eq!(rows.len(), 1);
     assert_eq!(missing, vec!["m/gone".to_owned()]);
 }
+
+/// `SRN` N1: the newest entry's stamp at exactly the key, whatever it holds —
+/// a row, an own deletion marker, an entry without its blob — and `None` for a
+/// key with no entry. A longer key beside it does not count.
+#[tokio::test]
+async fn latest_stamp_at_names_the_newest_entry_whatever_it_holds() {
+    let node = TestNode::new("stamp-at").await.unwrap();
+    let docs = node.db.docs("stamp-at", None).await.unwrap();
+    assert_eq!(docs.latest_stamp_at("c/a").await.unwrap(), None, "no entry, no stamp");
+
+    docs.put(row("c/a", "a")).await.unwrap();
+    let put = stamped(&docs, "c/a").await[0].2;
+    assert_eq!(docs.latest_stamp_at("c/a").await.unwrap(), Some(put), "a row: its stamp");
+
+    docs.delete("c/a").await.unwrap();
+    let marker = docs
+        .latest_stamp_at("c/a")
+        .await
+        .unwrap()
+        .expect("the deletion marker has a stamp");
+    assert!(marker > put, "the own deletion marker is newer: {marker} > {put}");
+    assert!(stamped(&docs, "c/").await.is_empty(), "and no read shows it");
+
+    docs.put(row("c/ab", "longer")).await.unwrap();
+    assert_eq!(
+        docs.latest_stamp_at("c/a").await.unwrap(),
+        Some(marker),
+        "a longer key beside it does not count"
+    );
+
+    let (doc, author) = own_document(&node, &docs).await;
+    let never_stored = b"content this node never held";
+    doc.set_hash(
+        author,
+        b"c/blobless".to_vec(),
+        Hash::new(never_stored),
+        never_stored.len() as u64,
+    )
+    .await
+    .unwrap();
+    assert!(
+        docs.latest_stamp_at("c/blobless").await.unwrap().is_some(),
+        "an entry without its blob has a stamp all the same"
+    );
+}
+
+/// `SRN` N1: across authors the stamp is the newest entry's — another author's
+/// newer row outranks an old own copy.
+#[tokio::test]
+async fn latest_stamp_at_answers_the_newest_author() {
+    let node = TestNode::new("stamp-at-authors").await.unwrap();
+    let docs = node.db.docs("stamp-at-authors", None).await.unwrap();
+    let (doc, _) = own_document(&node, &docs).await;
+    let willow = WillowDocs::new(node.iroh.backend().clone()).await.unwrap();
+    let other = willow.docs().author_create().await.unwrap();
+    willow
+        .set_bytes(&doc, other, b"k/x".to_vec(), b"newer".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(docs.put_at(row("k/x", "older"), 1).await.unwrap(), Placed::Written);
+    let newest = docs
+        .latest_stamp_at("k/x")
+        .await
+        .unwrap()
+        .expect("two entries, one stamp");
+    assert!(newest > 1, "the other author's newer row, not the old copy: {newest}");
+}
