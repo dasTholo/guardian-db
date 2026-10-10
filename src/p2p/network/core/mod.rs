@@ -620,6 +620,14 @@ impl IrohBackend {
                     .map(RelaySpec::relay_config)
                     .collect();
                 builder = builder.relay_mode(RelayMode::Custom(map));
+                // No captive-portal check against our own relays (`RN` AW10): the
+                // server redirects plain http at its entrypoint, so `/generate_204`
+                // answers 301, and without QAD (`RN` §1.3) no UDP probe ever
+                // succeeds — iroh would take every full report for a captive
+                // portal and force the next one full too (net_report.rs).
+                let mut net_report = iroh::endpoint::NetReportConfig::default();
+                net_report.captive_portal_check = false;
+                builder = builder.net_report_config(net_report);
             }
             if let Some(url) = &self.config.pkarr_url {
                 builder = builder
