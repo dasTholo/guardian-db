@@ -2,6 +2,8 @@ pub mod client;
 pub mod config;
 pub mod core;
 pub mod types;
+#[cfg(feature = "test-services")]
+pub mod test_services;
 
 // Main re-exports for compatibility.
 pub use client::IrohClient;

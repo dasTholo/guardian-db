@@ -6,12 +6,17 @@
 /// - Batch processing for optimized throughput
 /// - Real-time performance monitoring
 use crate::guardian::error::{GuardianError, Result};
-use crate::p2p::network::{config::ClientConfig, types::*};
+use crate::p2p::network::{
+    config::{ClientConfig, RelaySpec},
+    types::*,
+};
 use bytes::Bytes;
 use iroh::SecretKey;
+use iroh::address_lookup::pkarr::{PkarrPublisher, PkarrResolver};
 use iroh::endpoint::{BindOpts, Endpoint};
 use iroh::protocol::Router;
 use iroh::{EndpointAddr as NodeAddr, EndpointId as NodeId};
+use iroh::{RelayMap, RelayMode};
 use iroh_blobs::api::Tag;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobFormat, BlobsProtocol, Hash as IrohHash, HashAndFormat};
@@ -597,10 +602,31 @@ impl IrohBackend {
         // Two `builder()` calls and not one: `Endpoint::builder` takes `impl Preset`
         // and returns a plain `Builder`, so the two presets are two arguments and
         // never one value.
+        //
+        // And a THIRD way since `RN` (§2): `Minimal` plus the services the configuration
+        // NAMES — this network's own relays and its own pkarr lookup service, and nothing
+        // else. With neither named it is the closed deployment above. The publisher keeps
+        // its default filter (`AddrFilter::relay_only`): it publishes the home relay and
+        // NO direct IP address.
         let builder = if self.config.enable_discovery_n0 {
             Endpoint::builder(iroh::endpoint::presets::N0)
         } else {
-            Endpoint::builder(iroh::endpoint::presets::Minimal)
+            let mut builder = Endpoint::builder(iroh::endpoint::presets::Minimal);
+            if !self.config.relays.is_empty() {
+                let map: RelayMap = self
+                    .config
+                    .relays
+                    .iter()
+                    .map(RelaySpec::relay_config)
+                    .collect();
+                builder = builder.relay_mode(RelayMode::Custom(map));
+            }
+            if let Some(url) = &self.config.pkarr_url {
+                builder = builder
+                    .address_lookup(PkarrPublisher::builder(url.clone()))
+                    .address_lookup(PkarrResolver::builder(url.clone()));
+            }
+            builder
         };
 
         // The UDP port, when the configuration names one (`bind_port`). A closed

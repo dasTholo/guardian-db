@@ -5,9 +5,11 @@
 // Uses discovery via Pkarr/DNS/mDNS.
 
 use iroh::EndpointId as NodeId;
+use iroh::RelayUrl;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
+use url::Url;
 
 /// Complete configuration for the Iroh client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,18 @@ pub struct ClientConfig {
     /// Enables discovery via mDNS (local network).
     pub enable_discovery_mdns: bool,
 
+    /// This network's own relays (`RN` §2) — each with the token it admits by.
+    /// Read only when `enable_discovery_n0` is off, and `validate()` refuses the two
+    /// together. Empty in every preset: nothing changes for a caller naming none.
+    #[serde(default)]
+    pub relays: Vec<RelaySpec>,
+
+    /// This network's own pkarr lookup service (`…/pkarr`): the endpoint publishes
+    /// its id with its home relay there and resolves a peer's id there. `None` in
+    /// every preset.
+    #[serde(default)]
+    pub pkarr_url: Option<Url>,
+
     /// Iroh networking settings.
     pub network: NetworkConfig,
 
@@ -64,6 +78,8 @@ impl Default for ClientConfig {
             known_peers: vec![],
             enable_discovery_n0: true,   // Discovery via Pkarr/DNS.
             enable_discovery_mdns: true, // Local discovery.
+            relays: Vec::new(),
+            pkarr_url: None,
             network: NetworkConfig::default(),
             storage: StorageConfig::default(),
             gossip: GossipConfig::default(),
@@ -82,6 +98,8 @@ impl ClientConfig {
             known_peers: vec![],
             enable_discovery_n0: false,  // Disabled for local dev.
             enable_discovery_mdns: true, // Local discovery only.
+            relays: Vec::new(),
+            pkarr_url: None,
             network: NetworkConfig::development(),
             storage: StorageConfig::development(),
             gossip: GossipConfig::development(),
@@ -98,6 +116,8 @@ impl ClientConfig {
             known_peers: vec![],         // Would be populated with peers.
             enable_discovery_n0: true,   // Global discovery via n0.computer.
             enable_discovery_mdns: true, // Local discovery as well.
+            relays: Vec::new(),
+            pkarr_url: None,
             network: NetworkConfig::production(),
             storage: StorageConfig::production(),
             gossip: GossipConfig::production(),
@@ -114,6 +134,8 @@ impl ClientConfig {
             known_peers: vec![],
             enable_discovery_n0: false,
             enable_discovery_mdns: false,
+            relays: Vec::new(),
+            pkarr_url: None,
             network: NetworkConfig::testing(),
             storage: StorageConfig::testing(),
             gossip: GossipConfig::testing(),
@@ -171,6 +193,16 @@ impl ClientConfig {
             return Err("Cache size cannot be zero".to_string());
         }
 
+        // One source per question (`RN` §2): with n0 on, `initialize_node` builds
+        // `presets::N0` and never reads the two fields, so a configuration naming both
+        // would promise services it does not use.
+        if self.enable_discovery_n0 && (!self.relays.is_empty() || self.pkarr_url.is_some()) {
+            return Err(
+                "enable_discovery_n0 together with relays or pkarr_url: two sources for one question"
+                    .to_string(),
+            );
+        }
+
         Ok(())
     }
 
@@ -182,6 +214,42 @@ impl ClientConfig {
     /// Returns whether any discovery method is enabled.
     pub fn has_discovery_enabled(&self) -> bool {
         self.enable_discovery_n0 || self.enable_discovery_mdns
+    }
+}
+
+/// One relay a node uses, and the token it is admitted by (`RN` §2).
+///
+/// The token travels as `Authorization: Bearer` (`iroh::RelayConfig::with_auth_token`),
+/// NOT in the URL: a relay URL is published with every node's pkarr record
+/// (`url.to_string()`, iroh-dns 1.3.0 `endpoint_info.rs`), so a `?token=` there would
+/// stand in public DNS. `Debug` prints `<redacted>` in its place.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelaySpec {
+    /// Where the relay is dialled.
+    pub url: RelayUrl,
+    /// The `access.shared_token` the relay admits by, if it asks for one.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+impl RelaySpec {
+    /// The iroh relay entry: no QUIC address discovery (`RN` §1.3), the token in a
+    /// header.
+    pub fn relay_config(&self) -> iroh::RelayConfig {
+        let config = iroh::RelayConfig::new(self.url.clone(), None);
+        match &self.auth_token {
+            Some(token) => config.with_auth_token(token.clone()),
+            None => config,
+        }
+    }
+}
+
+impl std::fmt::Debug for RelaySpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelaySpec")
+            .field("url", &self.url)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "<redacted>"))
+            .finish()
     }
 }
 
@@ -498,5 +566,48 @@ mod tests {
         // Without discovery.
         let without_discovery = ClientConfig::offline();
         assert!(!without_discovery.has_discovery_enabled());
+    }
+
+    /// `RN` §2: the token never reaches a `Debug` line.
+    #[test]
+    fn a_relay_spec_never_prints_its_token() {
+        let spec = RelaySpec {
+            url: "https://relay.example.org".parse().unwrap(),
+            auth_token: Some("fence".into()),
+        };
+        let shown = format!("{spec:?}");
+        assert!(!shown.contains("fence"), "{shown}");
+        assert!(shown.contains("relay.example.org"), "{shown}");
+    }
+
+    /// `RN` §2: no preset names an own service — nothing changes for its callers.
+    #[test]
+    fn no_preset_names_a_relay_or_a_lookup_service() {
+        for (name, config) in [
+            ("default", ClientConfig::default()),
+            ("development", ClientConfig::development()),
+            ("production", ClientConfig::production()),
+            ("testing", ClientConfig::testing()),
+            ("offline", ClientConfig::offline()),
+        ] {
+            assert!(config.relays.is_empty(), "{name}() names a relay");
+            assert_eq!(config.pkarr_url, None, "{name}() names a lookup service");
+        }
+    }
+
+    /// `RN` §2: n0 beside an own service is two sources for one question.
+    #[test]
+    fn n0_beside_a_named_service_fails_validation() {
+        let mut with_relay = ClientConfig::production();
+        with_relay.relays = vec![RelaySpec {
+            url: "https://relay.example.org".parse().unwrap(),
+            auth_token: None,
+        }];
+        assert!(with_relay.validate().is_err());
+        let mut with_pkarr = ClientConfig::production();
+        with_pkarr.pkarr_url = Some("https://dns.example.org/pkarr".parse().unwrap());
+        assert!(with_pkarr.validate().is_err());
+        with_pkarr.enable_discovery_n0 = false;
+        assert!(with_pkarr.validate().is_ok());
     }
 }
