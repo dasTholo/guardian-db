@@ -318,11 +318,15 @@ impl WillowDocs {
     }
 
     /// Sets an entry at `key` for content the blob store ALREADY holds: no
-    /// `add_bytes` and no `sync_db`, because the caller holds a blob that was
-    /// made durable by its own `put` — the ordering [`Self::set_bytes`] buys
-    /// with its commit is already in place. A missing blob is NOT caught here:
-    /// the entry would be a dangling reference that the repair pass would
-    /// chase forever, so a caller checks `has` for `hash` first.
+    /// `add_bytes` and no `sync_db`.
+    ///
+    /// PRECONDITION, the caller's: the blob is present AND durable. Nothing
+    /// here commits the blob store, so the ordering [`Self::set_bytes`] buys
+    /// with its `sync_db` — blob committed before the entry exists — holds
+    /// only if the caller already established it. A missing blob is NOT
+    /// caught here either: the entry would be a dangling reference that the
+    /// repair pass would chase forever, so a caller checks `has` for `hash`
+    /// first.
     pub async fn set_hash_at(
         &self,
         doc: &Doc,
