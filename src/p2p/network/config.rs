@@ -383,10 +383,13 @@ pub struct StorageConfig {
     /// Maximum size of an individual blob (bytes).
     pub max_blob_size: usize,
 
-    /// Enables automatic garbage collection.
+    /// Superseded and read by nothing: the blob store collects garbage only
+    /// when `ClientConfig::gc` is set, with that setup's interval and protect
+    /// slot. Kept for the (de)serialized shape of this struct.
     pub enable_gc: bool,
 
-    /// Garbage collection interval.
+    /// Superseded and read by nothing, as `enable_gc`: the interval a GC runs
+    /// at is `GcSetup`'s, in `ClientConfig::gc`.
     pub gc_interval: Duration,
 }
 
