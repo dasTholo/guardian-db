@@ -770,4 +770,28 @@ mod tests {
         // get() on the unreadable record likewise yields nothing rather than erroring.
         assert!(store.get("theirs", None).await.expect("get").is_empty());
     }
+
+    #[tokio::test]
+    async fn an_img_entry_beside_a_document_is_never_decoded_by_query() {
+        // An `img/` entry holds raw image bytes, not a document. If it ever
+        // stood in the index, `query` would hand it to the JSON decode and
+        // fail the whole listing — so `query` skips the prefix itself.
+        let (mut store, _dir) = create_test_store().await.expect("store");
+        store
+            .put(create_test_document("doc1", "Beside an image"))
+            .await
+            .expect("put");
+        let img_key = format!(
+            "{}{}",
+            crate::stores::document_store::IMG_PREFIX,
+            "ab".repeat(32)
+        );
+        store.put_raw_for_test(&img_key, b"\x89PNG\r\n\x1a\n raw, not JSON".to_vec());
+
+        let results = store
+            .query(|_| Ok(true))
+            .expect("an img/ entry must not fail the listing");
+        assert_eq!(results.len(), 1, "the document only");
+        assert_eq!(results[0]["_id"], "doc1");
+    }
 }

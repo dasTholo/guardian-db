@@ -317,6 +317,33 @@ impl WillowDocs {
         Ok(hash)
     }
 
+    /// Sets an entry at `key` for content the blob store ALREADY holds: no
+    /// `add_bytes` and no `sync_db`, because the caller holds a blob that was
+    /// made durable by its own `put` — the ordering [`Self::set_bytes`] buys
+    /// with its commit is already in place. A missing blob is NOT caught here:
+    /// the entry would be a dangling reference that the repair pass would
+    /// chase forever, so a caller checks `has` for `hash` first.
+    pub async fn set_hash_at(
+        &self,
+        doc: &Doc,
+        author_id: AuthorId,
+        key: impl AsRef<[u8]>,
+        hash: iroh_blobs::Hash,
+        len: u64,
+    ) -> Result<()> {
+        doc.set_hash(author_id, Bytes::copy_from_slice(key.as_ref()), hash, len)
+            .await
+            .map_err(|e| {
+                error!("Failed to set an entry for an existing hash: {:?}", e);
+                GuardianError::Storage(format!(
+                    "Failed to set an entry for an existing hash: {:?}",
+                    e
+                ))
+            })?;
+        debug!("Set hash in document {:?}: hash={:?}", doc.id(), hash);
+        Ok(())
+    }
+
     /// [`Self::set_bytes`] with a STATED timestamp instead of now (`SR` §3.2): the
     /// namespace migration copies a row with the timestamp of its entry in the old
     /// namespace, so a copy never outranks what a device wrote later.

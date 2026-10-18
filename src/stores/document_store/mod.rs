@@ -33,6 +33,12 @@ const NAMESPACE_CACHE_KEY: &[u8] = b"_iroh_docs_doc_namespace_id";
 /// Stored as a single byte: 1 = write-capable, 0 = read-only.
 const WRITABLE_CACHE_KEY: &[u8] = b"_iroh_docs_doc_writable";
 
+/// Key prefix of a raw image entry (`NZ` B6, N4): its content IS the image
+/// bytes, not a document. The index refresh (`refresh_doc_index`) and
+/// [`GuardianDBDocumentStore::query`] skip every key under it, so an image
+/// never enters the RAM index and never reaches a JSON decode.
+pub const IMG_PREFIX: &str = "img/";
+
 /// Local in-memory index that mirrors the iroh-docs document state.
 ///
 /// Updated atomically after each put/delete operation,
@@ -173,6 +179,10 @@ impl DocumentStoreIndex {
 /// before) and reader-side deletions after the restart in 7 of 20 runs (11
 /// of 16 before); with the F1 and F5 fixes on top, the acceptance series
 /// went 29 of 29 green, F4 in 0 of 29.
+///
+/// An [`IMG_PREFIX`] entry is raw image bytes, not a document: it is left
+/// out of the snapshot, so it never enters the RAM index and never reaches
+/// a JSON decode (`NZ` B6, N4).
 async fn refresh_doc_index(
     docs: &WillowDocs,
     doc: &Doc,
@@ -183,8 +193,11 @@ async fn refresh_doc_index(
         .get_many(doc, Query::single_latest_per_key().build())
         .await?;
 
+    // Left out of the snapshot, an `img/` key that stood in the index anyway
+    // is pruned by the same pass that prunes a deleted one.
     let snapshot = entries
         .iter()
+        .filter(|entry| !entry.key().starts_with(IMG_PREFIX.as_bytes()))
         .map(|entry| {
             let key = String::from_utf8_lossy(entry.key()).to_string();
             let hash = (entry.content_len() > 0).then(|| entry.content_hash().to_hex());
@@ -1383,6 +1396,10 @@ impl GuardianDBDocumentStore {
         Ok(Operation::new(first_key, "PUTALL".to_string(), None))
     }
 
+    /// Every indexed document `filter` accepts. An `img/` key is skipped before
+    /// any decode: its value is raw image bytes, not a document, so it never
+    /// reaches the JSON decode (`NZ` B6, N4) — the refresh keeps such keys out
+    /// of the index already, this holds for a local write as well.
     #[instrument(level = "debug", skip(self, filter))]
     pub fn query<F>(&self, mut filter: F) -> Result<Vec<Document>>
     where
@@ -1391,6 +1408,9 @@ impl GuardianDBDocumentStore {
         let mut results: Vec<Document> = Vec::new();
 
         for index_key in self.index.keys() {
+            if index_key.starts_with(IMG_PREFIX) {
+                continue;
+            }
             if let Some(doc_bytes) = self.indexed_value(&index_key) {
                 let doc: Document = serde_json::from_slice(&doc_bytes).map_err(|e| {
                     GuardianError::Serialization(format!(

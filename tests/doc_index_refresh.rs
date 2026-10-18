@@ -8,8 +8,10 @@
 //! unit gates hold the loop mid-flight; these hold what reaches it.
 
 use guardian_db::p2p::network::core::docs::WillowDocs;
+use guardian_db::stores::document_store::IMG_PREFIX;
 use iroh_blobs::Hash;
 use iroh_docs::DocTicket;
+use iroh_docs::store::Query;
 mod common;
 
 use common::TestNode;
@@ -117,4 +119,72 @@ async fn a_key_deleted_in_the_document_leaves_the_index_on_refresh() {
         index.get_bytes("rev/de/bbb").unwrap().is_some(),
         "and only that one"
     );
+}
+
+#[tokio::test]
+async fn an_img_entry_beside_a_document_stays_out_of_the_index() {
+    let node = TestNode::new("refresh-img-entry").await.unwrap();
+    let docs = node.db.docs("refresh-img-entry", None).await.unwrap();
+
+    docs.put(Box::new(json!({ "_id": "rev/de/aaa", "name": "Alice" })))
+        .await
+        .unwrap();
+
+    // Raw image bytes under `img/`, written into the DOCUMENT and not
+    // through the store — the way a peer's image entry reaches the refresh.
+    let (doc, author) = own_document(&node, &docs).await;
+    let willow = WillowDocs::new(node.iroh.backend().clone()).await.unwrap();
+    let img_key = format!("{IMG_PREFIX}{}", "cd".repeat(32));
+    willow
+        .set_bytes(&doc, author, img_key.clone().into_bytes(), &b"\x89PNG raw"[..])
+        .await
+        .unwrap();
+
+    docs.load(0).await.unwrap();
+
+    let index = docs.index();
+    assert!(
+        index.get_bytes(&img_key).unwrap().is_none(),
+        "an img/ entry is raw image bytes, not a document: never in the index"
+    );
+    assert!(
+        !index
+            .keys()
+            .unwrap()
+            .iter()
+            .any(|k| k.starts_with(IMG_PREFIX)),
+        "no img/ key at all"
+    );
+    assert!(
+        index.get_bytes("rev/de/aaa").unwrap().is_some(),
+        "the document beside it is indexed as before"
+    );
+}
+
+#[tokio::test]
+async fn set_hash_at_points_a_new_key_at_content_the_store_already_holds() {
+    let node = TestNode::new("set-hash-at").await.unwrap();
+    let docs = node.db.docs("set-hash-at", None).await.unwrap();
+    let (doc, author) = own_document(&node, &docs).await;
+    let willow = WillowDocs::new(node.iroh.backend().clone()).await.unwrap();
+
+    let image = b"\x89PNG an image the store already holds";
+    let hash = willow
+        .set_bytes(&doc, author, b"staging/img".to_vec(), &image[..])
+        .await
+        .unwrap();
+
+    let img_key = format!("{IMG_PREFIX}{}", hash.to_hex());
+    willow
+        .set_hash_at(&doc, author, &img_key, hash, image.len() as u64)
+        .await
+        .unwrap();
+
+    let entry = willow
+        .get_one(&doc, Query::author(author).key_exact(img_key.as_bytes()))
+        .await
+        .unwrap()
+        .expect("the entry exists");
+    assert_eq!(entry.content_hash(), hash, "it names the existing content");
+    assert_eq!(entry.content_len(), image.len() as u64);
 }
