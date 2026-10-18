@@ -566,10 +566,25 @@ impl IrohBackend {
             .await
             .map_err(|e| GuardianError::Other(format!("Error creating store directory: {}", e)))?;
 
-        // Initialize the FsStore with persistence.
-        let fs_store = FsStore::load(&store_dir)
-            .await
-            .map_err(|e| GuardianError::Other(format!("Error initializing FsStore: {}", e)))?;
+        // Initialize the FsStore with persistence — with garbage collection only
+        // when the caller set one up (`ClientConfig::gc`). `load_with_opts` takes
+        // the redb file `FsStore::load` uses (`<root>/blobs.db`, iroh-blobs 0.103.1
+        // `fs.rs`), so an existing store opens with its content. The protect
+        // callback is the slot's forwarder: until the caller fills the slot every
+        // run aborts, and iroh-docs' stock handler is NOT used (`Engine::spawn`
+        // below gets `None`) — it would pin every entry of every replica.
+        let fs_store = match &self.config.gc {
+            None => FsStore::load(&store_dir).await,
+            Some(setup) => {
+                let mut options = iroh_blobs::store::fs::options::Options::new(&store_dir);
+                options.gc = Some(iroh_blobs::store::GcConfig {
+                    interval: setup.interval,
+                    add_protected: Some(setup.protect.as_cb()),
+                });
+                FsStore::load_with_opts(store_dir.join("blobs.db"), options).await
+            }
+        }
+        .map_err(|e| GuardianError::Other(format!("Error initializing FsStore: {}", e)))?;
 
         // Store the store.
         {

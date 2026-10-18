@@ -6,8 +6,10 @@
 
 use iroh::EndpointId as NodeId;
 use iroh::RelayUrl;
+use iroh_blobs::store::{ProtectCb, ProtectOutcome};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use url::Url;
 
@@ -66,6 +68,61 @@ pub struct ClientConfig {
 
     /// Gossip settings (iroh-gossip).
     pub gossip: GossipConfig,
+
+    /// Garbage collection of the blob store. `None` in every preset: the store
+    /// opens as it always did and no GC run ever happens. Not serialized — a
+    /// callback is no configuration value.
+    #[serde(skip)]
+    pub gc: Option<GcSetup>,
+}
+
+/// Blob-store garbage collection, as the caller sets it up (`ClientConfig::gc`).
+#[derive(Debug, Clone)]
+pub struct GcSetup {
+    /// The pause between two GC runs.
+    pub interval: Duration,
+    /// What a run keeps beyond tags and temp tags — filled once the caller
+    /// knows it, after the store has opened.
+    pub protect: ProtectSlot,
+}
+
+/// A protect callback bound LATE: the store opens (and its GC loop starts)
+/// before the caller can say what to protect, because that answer needs the
+/// docs engine standing on the very store.
+///
+/// Fail-closed while empty: [`Self::as_cb`] answers `ProtectOutcome::Abort`,
+/// so a run before [`Self::fill`] deletes nothing.
+#[derive(Clone, Default)]
+pub struct ProtectSlot(Arc<OnceLock<ProtectCb>>);
+
+impl ProtectSlot {
+    /// An empty slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bind `cb`. Once only: a second fill hands `cb` back.
+    pub fn fill(&self, cb: ProtectCb) -> Result<(), ProtectCb> {
+        self.0.set(cb)
+    }
+
+    /// The callback the store is given: it forwards to the filled one and
+    /// aborts the run while the slot is empty.
+    pub fn as_cb(&self) -> ProtectCb {
+        let slot = Arc::clone(&self.0);
+        Arc::new(move |live| match slot.get() {
+            Some(cb) => cb(live),
+            None => Box::pin(async { ProtectOutcome::Abort }),
+        })
+    }
+}
+
+impl std::fmt::Debug for ProtectSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtectSlot")
+            .field("filled", &self.0.get().is_some())
+            .finish()
+    }
 }
 
 impl Default for ClientConfig {
@@ -83,6 +140,7 @@ impl Default for ClientConfig {
             network: NetworkConfig::default(),
             storage: StorageConfig::default(),
             gossip: GossipConfig::default(),
+            gc: None,
         }
     }
 }
@@ -103,6 +161,7 @@ impl ClientConfig {
             network: NetworkConfig::development(),
             storage: StorageConfig::development(),
             gossip: GossipConfig::development(),
+            gc: None,
         }
     }
 
@@ -121,6 +180,7 @@ impl ClientConfig {
             network: NetworkConfig::production(),
             storage: StorageConfig::production(),
             gossip: GossipConfig::production(),
+            gc: None,
         }
     }
 
@@ -139,6 +199,7 @@ impl ClientConfig {
             network: NetworkConfig::testing(),
             storage: StorageConfig::testing(),
             gossip: GossipConfig::testing(),
+            gc: None,
         }
     }
 
@@ -617,5 +678,41 @@ mod tests {
         assert!(with_pkarr.validate().is_err());
         with_pkarr.enable_discovery_n0 = false;
         assert!(with_pkarr.validate().is_ok());
+    }
+
+    /// No preset collects garbage: the store opens as it always did.
+    #[test]
+    fn no_preset_sets_up_gc() {
+        for config in [
+            ClientConfig::default(),
+            ClientConfig::development(),
+            ClientConfig::production(),
+            ClientConfig::testing(),
+            ClientConfig::offline(),
+        ] {
+            assert!(config.gc.is_none());
+        }
+    }
+
+    /// An empty slot aborts the run; a filled one is called, and only once
+    /// filled.
+    #[tokio::test]
+    async fn an_unfilled_protect_slot_aborts_and_a_filled_one_is_called() {
+        let slot = ProtectSlot::new();
+        let cb = slot.as_cb();
+        let mut live = std::collections::HashSet::new();
+        assert!(matches!(cb(&mut live).await, ProtectOutcome::Abort));
+        assert!(live.is_empty());
+
+        let kept = iroh_blobs::Hash::new(b"kept");
+        let filled: ProtectCb = Arc::new(move |live| {
+            live.insert(kept);
+            Box::pin(async { ProtectOutcome::Continue })
+        });
+        assert!(slot.fill(filled.clone()).is_ok());
+        assert!(slot.fill(filled).is_err(), "a slot is filled once");
+        assert!(matches!(cb(&mut live).await, ProtectOutcome::Continue));
+        assert!(live.contains(&kept));
+        assert_eq!(format!("{slot:?}"), "ProtectSlot { filled: true }");
     }
 }
