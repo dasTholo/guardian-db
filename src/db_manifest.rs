@@ -16,6 +16,15 @@ pub struct Manifest {
     pub access_controller: String,
 }
 
+/// The named tag a manifest blob is kept under: `manifest_<blake3 hex>`.
+///
+/// Manifests are read back by hash on later opens, so they need a permanent
+/// tag; a name derived from the content makes re-adding the same manifest
+/// idempotent instead of leaving one `auto-<timestamp>` tag per open.
+pub(crate) fn manifest_tag(data: &[u8]) -> String {
+    format!("manifest_{}", hex::encode(Hash::new(data).as_bytes()))
+}
+
 /// Creates a new database manifest and saves it to Iroh.
 pub async fn create_db_manifest(
     client: &crate::p2p::network::client::IrohClient,
@@ -44,9 +53,11 @@ pub async fn create_db_manifest(
         GuardianError::Other(format!("Could not write the manifest data to CBOR: {}", e))
     })?;
 
-    // Add the data to Iroh.
+    // Add the data to Iroh under its stable name: every store open writes the
+    // same manifest again, and an `auto-` tag per open would pile up for good.
+    let tag = manifest_tag(&cbor_data);
     let response = client
-        .add_bytes(cbor_data)
+        .add_bytes_named(cbor_data, &tag)
         .await
         .map_err(|e| GuardianError::Other(format!("Error adding manifest: {}", e)))?;
 

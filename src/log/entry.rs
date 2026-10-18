@@ -190,8 +190,14 @@ impl Entry {
     /// [log]: ../log/struct.Log.html
     /// [Lamport clock]: ../lamport_clock/struct.LamportClock.html
     /// [reference-counting pointer]: https://doc.rust-lang.org/std/rc/struct.Rc.html
+    ///
+    /// The entry's hash is computed locally ([`Entry::compute_hash`]); nothing
+    /// is stored. `_client` stays in the signature for its callers. Storing
+    /// the JSON here (as this once did through [`Entry::hash_entry`]) left one
+    /// permanently `auto-` tagged blob per entry that nothing ever reads back:
+    /// [`Entry::from_hash`] decodes postcard, not this JSON.
     pub fn create(
-        client: &IrohClient,
+        _client: &IrohClient,
         identity: Identity,
         log_id: &str,
         data: &[u8],
@@ -199,28 +205,13 @@ impl Entry {
         clock: Option<LamportClock>,
     ) -> Arc<Entry> {
         let mut e = Entry::new(identity, log_id, data, nexts, clock);
-
-        // Use a separate thread with a new Runtime to avoid "cannot start runtime from within a runtime".
-        let client_clone = client.clone();
-        let entry_clone = e.clone();
-        let hash_result = std::thread::spawn(move || {
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(async move { Entry::hash_entry(&client_clone, &entry_clone).await })
-        })
-        .join()
-        .unwrap()
-        .unwrap();
-
-        e.hash = hash_result;
+        e.hash = Entry::compute_hash(&e);
         Arc::new(e)
     }
 
-    /// Stores `entry` in the Client `Iroh` and returns a future containing its hash.
-    ///
-    /// **N.B.** *At the moment stores the entry as JSON, not CBOR DAG.*
-    pub async fn hash_entry(client: &IrohClient, entry: &Entry) -> Result<Hash, Error> {
-        let e = json!({
+    /// The JSON form [`Entry::hash_entry`] stores and [`Entry::compute_hash`] hashes.
+    fn to_json(entry: &Entry) -> String {
+        json!({
             "hash": "null",
             "id": entry.id,
             "payload": String::from_utf8_lossy(&entry.payload),
@@ -228,7 +219,20 @@ impl Entry {
             "v": entry.v,
             "clock": entry.clock,
         })
-        .to_string();
+        .to_string()
+    }
+
+    /// Returns the hash [`Entry::hash_entry`] would store `entry` under,
+    /// without storing anything (BLAKE3 of the same JSON bytes).
+    pub fn compute_hash(entry: &Entry) -> Hash {
+        Hash::new(Entry::to_json(entry).as_bytes())
+    }
+
+    /// Stores `entry` in the Client `Iroh` and returns a future containing its hash.
+    ///
+    /// **N.B.** *At the moment stores the entry as JSON, not CBOR DAG.*
+    pub async fn hash_entry(client: &IrohClient, entry: &Entry) -> Result<Hash, Error> {
+        let e = Entry::to_json(entry);
 
         match client.add_bytes(e.as_bytes().to_vec()).await {
             Ok(response) => {

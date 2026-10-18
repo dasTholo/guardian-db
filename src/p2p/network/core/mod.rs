@@ -1439,8 +1439,6 @@ impl IrohBackend {
     // ╚════════════════════════════════════════════════════════════════════════════════╝
 
     pub async fn add(&self, mut data: Pin<Box<dyn AsyncRead + Send>>) -> Result<AddResponse> {
-        let start = Instant::now();
-
         debug!("Adding content via Iroh");
 
         // Read the data into a buffer.
@@ -1449,8 +1447,25 @@ impl IrohBackend {
             .await
             .map_err(|e| GuardianError::Other(format!("Error reading data: {}", e)))?;
 
-        // Convert to bytes::Bytes and save the size.
-        let bytes_data = Bytes::from(buffer);
+        self.add_tagged(Bytes::from(buffer), None).await
+    }
+
+    /// Adds `data` and protects it with the named tag `tag` instead of an
+    /// `auto-<timestamp>` tag.
+    ///
+    /// [`Self::add`] leaves a fresh `auto-<timestamp>` tag per call, so adding
+    /// the same bytes N times leaves N permanent tags. Under a named tag the
+    /// add is idempotent: the same name for the same bytes replaces itself.
+    /// The tag is set while the add still holds its temp tag, so there is no
+    /// window in which the blob is unprotected.
+    pub async fn add_named(&self, data: Bytes, tag: &str) -> Result<AddResponse> {
+        self.add_tagged(data, Some(tag)).await
+    }
+
+    /// Shared body of [`Self::add`] (`tag: None` → `auto-<timestamp>`) and
+    /// [`Self::add_named`].
+    async fn add_tagged(&self, bytes_data: Bytes, tag: Option<&str>) -> Result<AddResponse> {
+        let start = Instant::now();
         let data_size = bytes_data.len();
 
         // Get a reference to the store and clone the reference.
@@ -1462,11 +1477,13 @@ impl IrohBackend {
                 .ok_or_else(|| GuardianError::Other("Store not available".to_string()))?
             {
                 StoreType::Fs(fs_store) => {
-                    let outcome = fs_store
-                        .add_bytes(bytes_data.clone())
-                        .await
-                        .map_err(Self::map_iroh_error)?;
-                    (outcome.hash, "FsStore")
+                    let added = fs_store.add_bytes(bytes_data.clone());
+                    let hash = match tag {
+                        Some(name) => added.with_named_tag(name).await.map(|t| t.hash),
+                        None => added.await.map(|t| t.hash),
+                    }
+                    .map_err(Self::map_iroh_error)?;
+                    (hash, "FsStore")
                 }
             }
         }; // Drop the lock here.

@@ -296,9 +296,10 @@ pub async fn create(
         ));
     }
 
-    // Store it in Iroh using the native client.
+    // Store it in Iroh under its stable name (no `auto-` tag per store open).
+    let tag = crate::db_manifest::manifest_tag(&cbor_data);
     let response = client
-        .add_bytes(cbor_data)
+        .add_bytes_named(cbor_data, &tag)
         .await
         .map_err(|e| GuardianError::Store(format!("Failed to store manifest in iroh: {}", e)))?;
 

@@ -85,22 +85,19 @@ impl BlobStore {
     pub async fn add_document(&self, data: Bytes) -> Result<BlobHash> {
         let store = self.store.read().await;
 
-        // Add bytes to the store using the new API.
-        let outcome = store.blobs().add_bytes(data.clone()).await.map_err(|e| {
-            GuardianError::Other(format!("Error adding bytes to the blob store: {}", e))
-        })?;
-
-        let hash = outcome.hash;
-
-        // Create a permanent tag to protect against GC.
-        // Format: doc_<hash_hex>
+        // Add the bytes under their permanent tag `doc_<hash_hex>` in one step:
+        // a bare `add_bytes(..).await` would ALSO leave an `auto-<timestamp>`
+        // tag that nothing ever removes, so `delete_document` could not free it.
+        let hash = BlobHash::new(&data);
         let tag_name = format!("doc_{}", hex::encode(hash.as_bytes()));
-
         store
-            .tags()
-            .set(tag_name.as_bytes(), HashAndFormat::raw(hash))
+            .blobs()
+            .add_bytes(data.clone())
+            .with_named_tag(tag_name.as_bytes())
             .await
-            .map_err(|e| GuardianError::Other(format!("Error creating permanent tag: {}", e)))?;
+            .map_err(|e| {
+                GuardianError::Other(format!("Error adding bytes to the blob store: {}", e))
+            })?;
 
         debug!(
             "Document added to the blob store: {} ({} bytes)",
@@ -412,6 +409,23 @@ mod tests {
 
         let retrieved = blobs_client.get_document(&hash).await.unwrap();
         assert_eq!(data, retrieved);
+    }
+
+    #[tokio::test]
+    async fn add_document_leaves_only_its_doc_tag() {
+        let blobs_client = BlobStore::memory().await.unwrap();
+        let hash = blobs_client
+            .add_document(Bytes::from("tagged once"))
+            .await
+            .unwrap();
+
+        let store = blobs_client.store.read().await;
+        let mut names = Vec::new();
+        let mut tags = store.tags().list().await.unwrap();
+        while let Some(tag) = tags.next().await {
+            names.push(String::from_utf8_lossy(tag.unwrap().name.as_ref()).into_owned());
+        }
+        assert_eq!(names, vec![format!("doc_{}", hex::encode(hash.as_bytes()))]);
     }
 
     #[tokio::test]

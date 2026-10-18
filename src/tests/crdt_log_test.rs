@@ -111,6 +111,17 @@ mod tests {
         assert_eq!(log.values()[2].payload(), b"entryC");
     }
 
+    /// `Entry::create` hashes locally and stores nothing, yet names the entry
+    /// exactly as storing its JSON (`Entry::hash_entry`) would.
+    #[tokio::test]
+    async fn create_names_the_entry_as_storing_it_would() {
+        let client = client().await;
+        let e = Entry::create(&client, identity1(), "A", b"entryA", &[], None);
+        let stored = Entry::hash_entry(&client, &e).await.unwrap();
+        assert_eq!(*e.hash(), stored);
+        assert_eq!(Entry::compute_hash(&e), stored);
+    }
+
     #[tokio::test]
     async fn set_heads() {
         let client = client().await;

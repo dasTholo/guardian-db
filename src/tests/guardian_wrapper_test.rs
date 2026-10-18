@@ -507,6 +507,91 @@ async fn test_docs_delete() {
     assert_eq!(retrieved.len(), 0);
 }
 
+/// Every tag name in the blob store behind `backend`, sorted.
+async fn tag_names(backend: &crate::p2p::network::core::IrohBackend) -> Vec<String> {
+    use futures::StreamExt;
+    let store = backend.get_store_for_blobs().await.expect("blob store");
+    let store = store.read().await;
+    let mut names = Vec::new();
+    let mut tags = store.tags().list().await.expect("tag list");
+    while let Some(tag) = tags.next().await {
+        let tag = tag.expect("tag");
+        names.push(String::from_utf8_lossy(tag.name.as_ref()).into_owned());
+    }
+    names.sort();
+    names
+}
+
+/// A store open and the writes through the document store leave no
+/// `auto-<timestamp>` tag: such a tag is permanent, so every open and every
+/// write used to leave a blob nothing can ever collect. The manifests sit
+/// under `manifest_<hex>` (idempotent per content), the synthetic entry a
+/// write returns is hashed, not stored.
+#[tokio::test]
+async fn test_docs_open_and_writes_leave_no_auto_tag() {
+    let (client, temp_dir) = create_test_iroh_client().await;
+    let backend = client.backend().clone();
+    let db_dir = temp_dir.path().join("guardian_db");
+    std::fs::create_dir_all(&db_dir).expect("Failed to create db dir");
+    let options = NewGuardianDBOptions {
+        directory: Some(db_dir),
+        backend: Some(backend.clone()),
+        ..Default::default()
+    };
+    let guardian = GuardianDB::new(client, Some(options))
+        .await
+        .expect("Failed to create GuardianDB");
+
+    let store = guardian
+        .docs("test_docs_no_auto_tag", Some(create_test_options()))
+        .await
+        .expect("Failed to create DocumentStore");
+    let after_open = tag_names(&backend).await;
+    assert!(
+        after_open.iter().all(|name| !name.starts_with("auto-")),
+        "a store open leaves an auto- tag: {after_open:?}"
+    );
+    assert!(
+        after_open.iter().any(|name| name.starts_with("manifest_")),
+        "the manifests a later open reads back are kept under a name: {after_open:?}"
+    );
+
+    for n in 0..3 {
+        let doc: Document = Box::new(serde_json::json!({
+            "id": format!("row_{n}"),
+            "body": "x".repeat(2048),
+        }));
+        store.put(doc).await.expect("Failed to put document");
+    }
+    store.delete("row_0").await.expect("Failed to delete document");
+    assert_eq!(
+        tag_names(&backend).await,
+        after_open,
+        "a put or a delete leaves a tag"
+    );
+
+    // Every open writes its DB manifest again; under its content-derived
+    // name the rewrite replaces itself instead of adding a tag.
+    let client = guardian.base().client();
+    let ac = "/iroh/test_docs_no_auto_tag/access_control/x";
+    let first = crate::db_manifest::create_db_manifest(client, "again", "docstore", ac)
+        .await
+        .expect("first manifest write");
+    let with_one = tag_names(&backend).await;
+    let second = crate::db_manifest::create_db_manifest(client, "again", "docstore", ac)
+        .await
+        .expect("second manifest write");
+    assert_eq!(first, second);
+    assert_eq!(with_one.len(), after_open.len() + 1, "{with_one:?}");
+    assert_eq!(tag_names(&backend).await, with_one, "a rewrite adds a tag");
+
+    // The DB manifest is read back by hash, as a later open does.
+    let manifest = crate::db_manifest::read_db_manifest(client, &store.address().get_root())
+        .await
+        .expect("the manifest is still readable");
+    assert_eq!(manifest.name, "test_docs_no_auto_tag");
+}
+
 #[tokio::test]
 async fn test_docs_get_with_partial_match() {
     let (guardian, _temp_dir) = create_test_guardian_db().await;

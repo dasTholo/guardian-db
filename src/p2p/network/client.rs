@@ -214,6 +214,15 @@ impl IrohClient {
         self.backend.add(pinned_data).await
     }
 
+    /// Helper: Adds `Vec<u8>` data under the named tag `tag`.
+    ///
+    /// Unlike [`Self::add_bytes`], which leaves a fresh `auto-<timestamp>` tag
+    /// per call, this is idempotent: adding the same bytes under the same name
+    /// again leaves one tag (see `IrohBackend::add_named`).
+    pub async fn add_bytes_named(&self, data: Vec<u8>, tag: &str) -> Result<AddResponse> {
+        self.backend.add_named(data.into(), tag).await
+    }
+
     /// Helper: Retrieves data from the backend and reads it into a Vec<u8>.
     ///
     /// # Example
