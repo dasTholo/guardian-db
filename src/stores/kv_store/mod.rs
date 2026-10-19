@@ -741,7 +741,7 @@ impl GuardianDBKeyValue {
         let index = self.index.clone();
 
         tokio::spawn(async move {
-            let mut stream = match doc.subscribe().await {
+            let stream = match doc.subscribe().await {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("Failed to subscribe to iroh-docs doc events (KV): {:?}", e);
@@ -749,9 +749,11 @@ impl GuardianDBKeyValue {
                 }
             };
 
-            use futures::StreamExt;
             use iroh_docs::engine::LiveEvent;
-            while let Some(event) = stream.next().await {
+            // The stream is drained beside the refresh, never behind it, and
+            // a burst folds into one refresh (`stores/live_refresh.rs`: the
+            // loop that awaited the refresh here deadlocked the docs actor).
+            let wants_refresh = |event: &std::result::Result<LiveEvent, _>| {
                 // Rebuild the index ONLY on REMOTE-origin events (peer sync).
                 // Local writes update the index directly (`put_impl`), so
                 // rebuilding on them would be pure waste.
@@ -764,17 +766,24 @@ impl GuardianDBKeyValue {
                 // `put_impl`/`del` or a rebuild lock; both were on the table
                 // for `LI` and both were declined as a second, separate
                 // decision (`LI §0.5`, `§7`).
-                let is_remote = matches!(
+                matches!(
                     event,
                     Ok(LiveEvent::InsertRemote { .. })
                         | Ok(LiveEvent::ContentReady { .. })
                         | Ok(LiveEvent::PendingContentReady)
                         | Ok(LiveEvent::SyncFinished(_))
-                );
-                if is_remote && let Err(e) = refresh_kv_index(&docs, &doc, &client, &index).await {
-                    warn!("Failed to update KV index via live sync: {:?}", e);
+                )
+            };
+            let refresh = move || {
+                let (docs, doc, client, index) =
+                    (docs.clone(), doc.clone(), client.clone(), index.clone());
+                async move {
+                    if let Err(e) = refresh_kv_index(&docs, &doc, &client, &index).await {
+                        warn!("Failed to update KV index via live sync: {:?}", e);
+                    }
                 }
-            }
+            };
+            crate::stores::live_refresh::refresh_on_events(stream, wants_refresh, refresh).await;
             debug!("Live index sync terminated for KV store");
         });
     }

@@ -3,6 +3,7 @@ pub mod document_store;
 pub mod event_log_store;
 pub mod events;
 pub mod kv_store;
+mod live_refresh;
 pub mod operation;
 pub mod payload_codec;
 pub mod sync_observer;
