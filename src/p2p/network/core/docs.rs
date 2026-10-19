@@ -142,9 +142,10 @@ impl WillowDocs {
     /// Shares an existing document by generating a `DocTicket` (capability model).
     ///
     /// The ticket carries the namespace key (secret for writing, public for reading)
-    /// and this node's addresses so the peer can connect and synchronize. Only whoever
-    /// receives the ticket can import and synchronize the document — it is the
-    /// replication access-control point.
+    /// and this node's `EndpointId` — no addresses (`AddrInfoOptions::default()` is
+    /// `Id`); the peer finds the addresses through its address lookup (DNS, mDNS or a
+    /// known address). Only whoever receives the ticket can import and synchronize the
+    /// document — it is the replication access-control point.
     ///
     /// # Arguments
     /// * `doc` - The document to share
@@ -158,7 +159,7 @@ impl WillowDocs {
             ShareMode::Read
         };
 
-        // AddrInfoOptions::default() includes the address/relay information needed for dialing.
+        // `AddrInfoOptions::default()` is `Id`: the ticket names the endpoint, not its addresses.
         doc.share(mode, Default::default()).await.map_err(|e| {
             GuardianError::Storage(format!("Failed to share document via ticket: {:?}", e))
         })
