@@ -1207,3 +1207,71 @@ async fn test_remove_nonexistent_pin() {
     // Não deve causar panic
     let _ = result;
 }
+
+// ╔════════════════════════════════════════════════════════════════════════════════╗
+// ║                         EXTRA PROTOCOLS (ClientConfig)                         ║
+// ╚════════════════════════════════════════════════════════════════════════════════╝
+
+/// Answers one bidirectional stream with the bytes it read.
+#[derive(Debug)]
+struct Echo;
+
+impl iroh::protocol::ProtocolHandler for Echo {
+    async fn accept(
+        &self,
+        connection: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        let bytes = recv
+            .read_to_end(64)
+            .await
+            .map_err(iroh::protocol::AcceptError::from_err)?;
+        send.write_all(&bytes)
+            .await
+            .map_err(iroh::protocol::AcceptError::from_err)?;
+        send.finish()
+            .map_err(iroh::protocol::AcceptError::from_err)?;
+        connection.closed().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn an_extra_protocol_is_served_by_the_router() {
+    const ALPN: &[u8] = b"/guardian-db/test-echo/1";
+    let (mut server_config, _server_dir) = create_test_config().await;
+    let handler: Arc<dyn iroh::protocol::DynProtocolHandler> = Arc::new(Echo);
+    server_config.extra_protocols = vec![(ALPN.to_vec(), handler)];
+    let server = IrohBackend::new(&server_config)
+        .await
+        .expect("Failed to create the serving backend");
+    let (client, _client_dir) = create_test_backend().await;
+
+    let server_addr = {
+        let endpoint = server.get_endpoint().await.expect("server endpoint");
+        let endpoint = endpoint.read().await;
+        endpoint.as_ref().expect("server endpoint bound").addr()
+    };
+    let endpoint = {
+        let endpoint = client.get_endpoint().await.expect("client endpoint");
+        let endpoint = endpoint.read().await;
+        endpoint.as_ref().expect("client endpoint bound").clone()
+    };
+
+    let connection = tokio::time::timeout(
+        Duration::from_secs(10),
+        endpoint.connect(server_addr, ALPN),
+    )
+    .await
+    .expect("the dial timed out")
+    .expect("the extra ALPN was not accepted");
+    let (mut send, mut recv) = connection.open_bi().await.expect("open a stream");
+    send.write_all(b"ping").await.expect("write");
+    send.finish().expect("finish");
+    let echoed = tokio::time::timeout(Duration::from_secs(10), recv.read_to_end(64))
+        .await
+        .expect("the answer timed out")
+        .expect("read the answer");
+    assert_eq!(echoed, b"ping");
+    connection.close(0u32.into(), b"done");
+}

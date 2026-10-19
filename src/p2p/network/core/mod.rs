@@ -50,6 +50,34 @@ pub use docs::WillowDocs;
 pub use gossip::EpidemicPubSub;
 pub use optimized_cache::OptimizedCache;
 
+/// A handler from `ClientConfig::extra_protocols`, registered on the router.
+///
+/// `Router::accept` takes a `Box<dyn DynProtocolHandler>` and a `Box` is not
+/// `Clone`, while the config is: the config holds an `Arc`, and this newtype
+/// forwards every call to it.
+#[derive(Debug)]
+struct SharedHandler(Arc<dyn iroh::protocol::DynProtocolHandler>);
+
+impl iroh::protocol::ProtocolHandler for SharedHandler {
+    async fn on_accepting(
+        &self,
+        accepting: iroh::endpoint::Accepting,
+    ) -> std::result::Result<iroh::endpoint::Connection, iroh::protocol::AcceptError> {
+        self.0.on_accepting(accepting).await
+    }
+
+    async fn accept(
+        &self,
+        connection: iroh::endpoint::Connection,
+    ) -> std::result::Result<(), iroh::protocol::AcceptError> {
+        self.0.accept(connection).await
+    }
+
+    async fn shutdown(&self) {
+        self.0.shutdown().await
+    }
+}
+
 /// Information about a pinned object.
 #[derive(Debug, Clone)]
 pub struct PinInfo {
@@ -791,6 +819,15 @@ impl IrohBackend {
                 crate::p2p::network::core::ticket_exchange::TICKET_ALPN,
                 ticket_handler,
             );
+        // The caller's own protocols (`ClientConfig::extra_protocols`), after
+        // the four built-in ALPNs.
+        let router_builder = self
+            .config
+            .extra_protocols
+            .iter()
+            .fold(router_builder, |builder, (alpn, handler)| {
+                builder.accept(alpn, SharedHandler(Arc::clone(handler)))
+            });
 
         // Guardian Compute executor: serves delegated WASM tasks over the
         // compute ALPN, fetching task blobs from the requester via iroh-blobs.

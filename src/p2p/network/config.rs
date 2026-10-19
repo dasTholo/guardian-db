@@ -74,6 +74,14 @@ pub struct ClientConfig {
     /// callback is no configuration value.
     #[serde(skip)]
     pub gc: Option<GcSetup>,
+
+    /// Protocols the caller serves next to the built-in ALPNs, each as its
+    /// ALPN with the handler that accepts it. Empty in every preset. The
+    /// router registers them after gossip, blobs, docs and the ticket
+    /// exchange (`initialize_node`). Not serialized — a handler is no
+    /// configuration value; an `Arc` because the config is `Clone`.
+    #[serde(skip)]
+    pub extra_protocols: Vec<(Vec<u8>, Arc<dyn iroh::protocol::DynProtocolHandler>)>,
 }
 
 /// Blob-store garbage collection, as the caller sets it up (`ClientConfig::gc`).
@@ -141,6 +149,7 @@ impl Default for ClientConfig {
             storage: StorageConfig::default(),
             gossip: GossipConfig::default(),
             gc: None,
+            extra_protocols: Vec::new(),
         }
     }
 }
@@ -162,6 +171,7 @@ impl ClientConfig {
             storage: StorageConfig::development(),
             gossip: GossipConfig::development(),
             gc: None,
+            extra_protocols: Vec::new(),
         }
     }
 
@@ -181,6 +191,7 @@ impl ClientConfig {
             storage: StorageConfig::production(),
             gossip: GossipConfig::production(),
             gc: None,
+            extra_protocols: Vec::new(),
         }
     }
 
@@ -200,6 +211,7 @@ impl ClientConfig {
             storage: StorageConfig::testing(),
             gossip: GossipConfig::testing(),
             gc: None,
+            extra_protocols: Vec::new(),
         }
     }
 
