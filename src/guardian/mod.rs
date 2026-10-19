@@ -1072,17 +1072,11 @@ impl DocumentStoreWrapper {
                             documents.push(doc);
                         }
                         Err(e) => {
-                            eprintln!(
-                                "Warning: Failed to deserialize document for key '{}': {}",
-                                index_key, e
-                            );
+                            tracing::warn!(key = %index_key, error = %e, "failed to deserialize the document for an index key");
                         }
                     }
                 } else {
-                    eprintln!(
-                        "Warning: key '{}' found but without a corresponding value",
-                        index_key
-                    );
+                    tracing::warn!(key = %index_key, "an index key without a corresponding value");
                 }
             }
         }
