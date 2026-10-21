@@ -868,6 +868,14 @@ pub trait StoreIndex: Send + Sync {
     /// Useful for iteration and listing operations.
     fn keys(&self) -> std::result::Result<Vec<String>, Self::Error>;
 
+    /// Returns the keys starting with `prefix`, in no particular order.
+    /// Noosphere: an index may filter before it clones (`CH` §13 "Messung (Task 15)").
+    fn keys_with_prefix(&self, prefix: &str) -> std::result::Result<Vec<String>, Self::Error> {
+        let mut keys = self.keys()?;
+        keys.retain(|key| key.starts_with(prefix));
+        Ok(keys)
+    }
+
     /// Returns the number of entries in the index.
     fn len(&self) -> std::result::Result<usize, Self::Error>;
 

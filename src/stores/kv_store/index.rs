@@ -47,6 +47,15 @@ impl StoreIndex for KvIndex {
         Ok(index.keys().cloned().collect())
     }
 
+    fn keys_with_prefix(&self, prefix: &str) -> std::result::Result<Vec<String>, Self::Error> {
+        let index = self.index.read();
+        Ok(index
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
+
     fn len(&self) -> std::result::Result<usize, Self::Error> {
         let index = self.index.read();
         Ok(index.len())

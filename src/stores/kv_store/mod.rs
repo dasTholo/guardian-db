@@ -240,6 +240,15 @@ impl StoreIndex for KeyValueIndex {
         Ok(guard.keys().cloned().collect())
     }
 
+    fn keys_with_prefix(&self, prefix: &str) -> std::result::Result<Vec<String>, Self::Error> {
+        let guard = self.index.read();
+        Ok(guard
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
+
     fn len(&self) -> std::result::Result<usize, Self::Error> {
         let guard = self.index.read();
         Ok(guard.len())
