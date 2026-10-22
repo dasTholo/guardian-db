@@ -82,3 +82,30 @@ impl StoreIndex for KvIndex {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_with_prefix_filters_as_keys_does() {
+        // Noosphere `CN` K6: the override filters before it clones and
+        // answers exactly the keys `keys()` holds under the prefix.
+        let index = KvIndex::new();
+        for key in ["a/1", "a/2", "a", "b/1", "ab/1"] {
+            index.index.write().insert(key.to_string(), Vec::new());
+        }
+        for prefix in ["a/", "a", "b/", "", "c/"] {
+            let mut got = index.keys_with_prefix(prefix).unwrap();
+            got.sort_unstable();
+            let mut want: Vec<String> = index
+                .keys()
+                .unwrap()
+                .into_iter()
+                .filter(|k| k.starts_with(prefix))
+                .collect();
+            want.sort_unstable();
+            assert_eq!(got, want, "{prefix:?}");
+        }
+    }
+}

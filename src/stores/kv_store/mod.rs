@@ -1383,4 +1383,57 @@ mod tests {
         assert_eq!(index.get_value("a"), Some(b"NEW-a".to_vec()));
         assert_eq!(index.get_value("b"), Some(b"NEW-b".to_vec()));
     }
+
+    /// The trait's DEFAULT `keys_with_prefix` over an index's keys: a wrapper
+    /// that delegates every required method and overrides nothing else.
+    struct DefaultOnly<'a>(&'a KeyValueIndex);
+
+    impl StoreIndex for DefaultOnly<'_> {
+        type Error = GuardianError;
+        fn contains_key(&self, key: &str) -> std::result::Result<bool, Self::Error> {
+            self.0.contains_key(key)
+        }
+        fn get_bytes(&self, key: &str) -> std::result::Result<Option<Vec<u8>>, Self::Error> {
+            self.0.get_bytes(key)
+        }
+        fn keys(&self) -> std::result::Result<Vec<String>, Self::Error> {
+            self.0.keys()
+        }
+        // Through the trait: `KeyValueIndex` has inherent `len`/`is_empty`
+        // answering bare values, and an inherent method wins the call.
+        fn len(&self) -> std::result::Result<usize, Self::Error> {
+            StoreIndex::len(self.0)
+        }
+        fn is_empty(&self) -> std::result::Result<bool, Self::Error> {
+            StoreIndex::is_empty(self.0)
+        }
+        fn update_index(
+            &mut self,
+            _log: &crate::log::Log,
+            _entries: &[crate::log::entry::Entry],
+        ) -> std::result::Result<(), Self::Error> {
+            Ok(())
+        }
+        fn clear(&mut self) -> std::result::Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn keys_with_prefix_answers_what_the_default_answers() {
+        // Noosphere `CN` K6: the override and the trait's default agree on
+        // every prefix — including the empty one, a key equal to the prefix,
+        // and a longer segment that only starts like it.
+        let index = KeyValueIndex::new();
+        for key in ["a/1", "a/2", "a", "b/1", "ab/1"] {
+            index.insert(key.to_string(), Vec::new());
+        }
+        for prefix in ["a/", "a", "b/", "", "c/"] {
+            let mut got = index.keys_with_prefix(prefix).unwrap();
+            let mut default = DefaultOnly(&index).keys_with_prefix(prefix).unwrap();
+            got.sort_unstable();
+            default.sort_unstable();
+            assert_eq!(got, default, "{prefix:?}");
+        }
+    }
 }
