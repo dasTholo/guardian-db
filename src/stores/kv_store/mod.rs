@@ -1386,6 +1386,8 @@ mod tests {
 
     /// The trait's DEFAULT `keys_with_prefix` over an index's keys: a wrapper
     /// that delegates every required method and overrides nothing else.
+    /// `update_index` and `clear` are empty: the test only reads through
+    /// the wrapper — it never feeds it a log nor clears it.
     struct DefaultOnly<'a>(&'a KeyValueIndex);
 
     impl StoreIndex for DefaultOnly<'_> {
