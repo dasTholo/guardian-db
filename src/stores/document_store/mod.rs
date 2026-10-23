@@ -1569,37 +1569,17 @@ impl GuardianDBDocumentStore {
                 continue;
             }
             let key = String::from_utf8_lossy(entry.key()).to_string();
-            let hash_str = entry.content_hash().to_hex();
-            let stored = match self.client.cat_bytes(&hash_str).await {
-                Ok(stored) => stored,
-                // `SR` §3.3: only the lossy scan steps over a missing blob.
-                // `SR` E13: only a blob the store does not hold (or holds
-                // incompletely) is missing content; any other read error — an
-                // uninitialised store, I/O mid-read — stays an error. When the
-                // check itself fails, the error carries both causes. `SRN` N5: a
-                // held blob that does not read is named, key and cause, and stays
-                // an error under the flag.
-                Err(e) => {
-                    let Some(missing) = missing.as_deref_mut() else {
-                        return Err(e);
-                    };
-                    match self.blob_is_local(entry.content_hash()).await {
-                        Ok(false) => {
-                            missing.push(key);
-                            continue;
-                        }
-                        Ok(true) => {
-                            return Err(GuardianError::Other(format!(
-                                "the blob of '{key}' is held but cannot be read: {e} \
-                                 (`--leave-missing` covers content that is missing, \
-                                 not content that is unreadable)"
-                            )));
-                        }
-                        Err(check) => {
-                            return Err(GuardianError::Other(format!("{e}; {check}")));
-                        }
-                    }
-                }
+            let hash = entry.content_hash();
+            let hash_str = hash.to_hex();
+            let Some(stored) = read_entry_blob(
+                &key,
+                || self.client.cat_bytes(&hash_str),
+                || self.blob_is_local(hash),
+                missing.as_deref_mut(),
+            )
+            .await?
+            else {
+                continue;
             };
             let plaintext = self.decode_value(&key, stored)?;
             out.push(RawEntry {
@@ -1744,9 +1724,130 @@ pub fn default_store_opts_for_map(key_field: &str) -> CreateDocumentDBOptions {
     }
 }
 
+/// One entry's blob for `GuardianDBDocumentStore::scan_raw_entries`:
+/// `Some(bytes)`, or `None` for a key the lossy scan steps over (pushed onto
+/// `missing`). `read` and `is_local` are the store's `cat_bytes` and
+/// `blob_is_local`, passed in so the decision can be held without a node.
+///
+/// `SR` §3.3: only the lossy scan steps over a missing blob. `SR` E13: only a
+/// blob the store does not hold (or holds incompletely) is missing content;
+/// any other read error — an uninitialised store, I/O mid-read — stays an
+/// error. When the check itself fails, the error carries both causes. `SRN`
+/// N5: a held blob that does not read is named, key and cause, and stays an
+/// error under the flag.
+async fn read_entry_blob<R, RF, L, LF>(
+    key: &str,
+    read: R,
+    is_local: L,
+    missing: Option<&mut Vec<String>>,
+) -> Result<Option<Vec<u8>>>
+where
+    R: Fn() -> RF,
+    RF: std::future::Future<Output = Result<Vec<u8>>>,
+    L: FnOnce() -> LF,
+    LF: std::future::Future<Output = Result<bool>>,
+{
+    let e = match read().await {
+        Ok(stored) => return Ok(Some(stored)),
+        Err(e) => e,
+    };
+    let Some(missing) = missing else {
+        return Err(e);
+    };
+    match is_local().await {
+        Ok(false) => {
+            missing.push(key.to_string());
+            Ok(None)
+        }
+        // `DR` §6 K1, D6: held by the check after the read failed is, first, a
+        // blob that completed mid-read — the download finished between the
+        // two — and not a substrate error. It is read ONCE more; only a
+        // second failure is a held blob that does not read (`SRN` N5).
+        Ok(true) => match read().await {
+            Ok(stored) => Ok(Some(stored)),
+            Err(again) => Err(GuardianError::Other(format!(
+                "the blob of '{key}' is held but cannot be read: {again} \
+                 (`--leave-missing` covers content that is missing, \
+                 not content that is unreadable)"
+            ))),
+        },
+        Err(check) => Err(GuardianError::Other(format!("{e}; {check}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `read` for [`read_entry_blob`] that fails its first `fails` calls with
+    /// an I/O-like error and then answers `bytes`.
+    fn reads_after(
+        fails: usize,
+        bytes: &'static [u8],
+    ) -> impl Fn() -> std::future::Ready<Result<Vec<u8>>> {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        move || {
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(if n < fails {
+                Err(GuardianError::Other("Error reading data: Error::Io".into()))
+            } else {
+                Ok(bytes.to_vec())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_blob_that_completes_mid_read_is_read_again_and_not_an_error() {
+        // `DR` §6 K1, D6: the first read fails while the blob is still
+        // arriving; by the check it is held. That is a blob that completed
+        // mid-read, not an unreadable one.
+        let mut missing = Vec::new();
+        let got = read_entry_blob(
+            "rev/de/aaa",
+            reads_after(1, b"BYTES"),
+            || std::future::ready(Ok(true)),
+            Some(&mut missing),
+        )
+        .await
+        .expect("a blob that completed mid-read is read, not an error");
+        assert_eq!(got, Some(b"BYTES".to_vec()));
+        assert!(missing.is_empty(), "and no key is skipped");
+    }
+
+    #[tokio::test]
+    async fn a_held_blob_that_never_reads_stays_an_error() {
+        // `SRN` N5: a held blob that does not read is named and stays an
+        // error under the lossy flag.
+        let mut missing = Vec::new();
+        let err = read_entry_blob(
+            "rev/de/aaa",
+            reads_after(usize::MAX, b""),
+            || std::future::ready(Ok(true)),
+            Some(&mut missing),
+        )
+        .await
+        .expect_err("a held blob that never reads is an error");
+        assert!(
+            err.to_string().contains("'rev/de/aaa' is held but cannot be read"),
+            "{err}"
+        );
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_blob_that_is_not_local_is_a_skipped_and_named_key() {
+        let mut missing = Vec::new();
+        let got = read_entry_blob(
+            "rev/de/aaa",
+            reads_after(usize::MAX, b""),
+            || std::future::ready(Ok(false)),
+            Some(&mut missing),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, None);
+        assert_eq!(missing, vec!["rev/de/aaa".to_string()]);
+    }
 
     #[test]
     fn a_hand_built_clear_and_refill_loses_a_visible_key_the_swap_never_does() {
