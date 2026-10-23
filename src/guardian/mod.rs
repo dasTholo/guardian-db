@@ -1533,6 +1533,41 @@ impl DocumentStore for DocumentStoreWrapper {
         Ok((values, missing))
     }
 
+    async fn scan_raw(
+        &self,
+        prefix: &str,
+    ) -> std::result::Result<Vec<crate::traits::RawEntry>, Self::Error> {
+        // The downcast of `scan_docs`, for the same reason.
+        self.store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "scan_raw: underlying store is not a GuardianDBDocumentStore".to_string(),
+                )
+            })?
+            .scan_raw(prefix)
+            .await
+    }
+
+    async fn scan_raw_lossy(
+        &self,
+        prefix: &str,
+    ) -> std::result::Result<(Vec<crate::traits::RawEntry>, Vec<String>), Self::Error> {
+        // The downcast of `scan_docs`, for the same reason.
+        self.store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "scan_raw_lossy: underlying store is not a GuardianDBDocumentStore"
+                        .to_string(),
+                )
+            })?
+            .scan_raw_lossy(prefix)
+            .await
+    }
+
     async fn latest_stamp_at(&self, key: &str) -> std::result::Result<Option<u64>, Self::Error> {
         // The downcast of `scan_docs`, for the same reason.
         self.store

@@ -12,8 +12,8 @@ use crate::p2p::network::core::docs::WillowDocs;
 use crate::stores::operation::Operation;
 use crate::stores::payload_codec::{RecordCtx, SharedPayloadCodec, codec_or_identity};
 use crate::traits::{
-    CreateDocumentDBOptions, DocumentStoreGetOptions, NewStoreOptions, Placed, Store, StoreIndex,
-    TracerWrapper,
+    CreateDocumentDBOptions, DocumentStoreGetOptions, NewStoreOptions, Placed, RawEntry, Store,
+    StoreIndex, TracerWrapper,
 };
 use bytes::Bytes;
 use iroh_docs::{AuthorId, Capability, api::Doc, store::Query};
@@ -1503,14 +1503,52 @@ impl GuardianDBDocumentStore {
         Ok(entries.iter().map(|e| e.timestamp()).max())
     }
 
+    /// Every entry under `prefix` as [`RawEntry`] — `DR` §6 N9.
+    pub async fn scan_raw(&self, prefix: &str) -> Result<Vec<RawEntry>> {
+        self.scan_raw_entries(prefix, None).await
+    }
+
+    /// [`Self::scan_raw`], skipping and naming an entry whose blob is not
+    /// local.
+    pub async fn scan_raw_lossy(&self, prefix: &str) -> Result<(Vec<RawEntry>, Vec<String>)> {
+        let mut missing = Vec::new();
+        let found = self.scan_raw_entries(prefix, Some(&mut missing)).await?;
+        Ok((found, missing))
+    }
+
     /// The body of [`Self::scan_docs`]: every document under `prefix` with the
     /// timestamp of the entry it was read from. With `missing`, an entry whose
     /// blob is not local is skipped and its key pushed there; without, it fails.
     async fn scan_entries(
         &self,
         prefix: &str,
-        mut missing: Option<&mut Vec<String>>,
+        missing: Option<&mut Vec<String>>,
     ) -> Result<Vec<(Document, u64)>> {
+        let raw = self.scan_raw_entries(prefix, missing).await?;
+        let mut out = Vec::with_capacity(raw.len());
+        for entry in raw {
+            let document: Document = serde_json::from_slice(&entry.bytes).map_err(|e| {
+                GuardianError::Serialization(format!(
+                    "Could not deserialize the document under '{}': {}",
+                    entry.key, e
+                ))
+            })?;
+            out.push((document, entry.timestamp));
+        }
+
+        debug!("SCAN prefix='{}' → {} documents via iroh-docs", prefix, out.len());
+        Ok(out)
+    }
+
+    /// The body of [`Self::scan_raw`] and of [`Self::scan_entries`]: every
+    /// entry under `prefix`, its blob read and run through the payload codec,
+    /// parsed by nobody (`DR` §6 N9). With `missing`, an entry whose blob is not
+    /// local is skipped and its key pushed there; without, it fails.
+    async fn scan_raw_entries(
+        &self,
+        prefix: &str,
+        mut missing: Option<&mut Vec<String>>,
+    ) -> Result<Vec<RawEntry>> {
         let _entered = self.span.enter();
 
         // `key_prefix` on the SingleLatestPerKey builder and not the other way
@@ -1564,16 +1602,13 @@ impl GuardianDBDocumentStore {
                 }
             };
             let plaintext = self.decode_value(&key, stored)?;
-            let document: Document = serde_json::from_slice(&plaintext).map_err(|e| {
-                GuardianError::Serialization(format!(
-                    "Could not deserialize the document under '{}': {}",
-                    key, e
-                ))
-            })?;
-            out.push((document, entry.timestamp()));
+            out.push(RawEntry {
+                key,
+                bytes: plaintext,
+                timestamp: entry.timestamp(),
+            });
         }
 
-        debug!("SCAN prefix='{}' → {} documents via iroh-docs", prefix, out.len());
         Ok(out)
     }
 

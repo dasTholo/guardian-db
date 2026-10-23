@@ -768,6 +768,17 @@ pub enum Placed {
     Superseded,
 }
 
+/// One entry as the store holds it: its key, the plaintext bytes (after
+/// the store's payload codec), the entry's timestamp in microseconds
+/// since the epoch — read from the iroh-docs document and parsed by
+/// nobody here (`DR` §6 N9: the codec is the caller's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawEntry {
+    pub key: String,
+    pub bytes: Vec<u8>,
+    pub timestamp: u64,
+}
+
 /// A store that handles documents (semi-structured objects).
 ///
 /// This trait combines basic store functionality with document-specific
@@ -826,6 +837,19 @@ pub trait DocumentStore: Store {
         &self,
         prefix: &str,
     ) -> Result<(Vec<(Document, u64)>, Vec<String>), Self::Error>;
+
+    /// [`Self::scan_docs_stamped`] without the JSON parse: every entry
+    /// under `prefix` as [`RawEntry`]. A blob that is not local is an
+    /// error, as there.
+    async fn scan_raw(&self, prefix: &str) -> Result<Vec<RawEntry>, Self::Error>;
+
+    /// [`Self::scan_raw`], stepping over an entry whose blob is not local
+    /// and naming its key — the lossy twin, as
+    /// [`Self::scan_docs_stamped_lossy`] is of `scan_docs_stamped`.
+    async fn scan_raw_lossy(
+        &self,
+        prefix: &str,
+    ) -> Result<(Vec<RawEntry>, Vec<String>), Self::Error>;
 
     /// The timestamp of the newest entry at exactly `key`, over all authors — a
     /// deletion marker and an entry whose content is not local included — or

@@ -86,6 +86,56 @@ async fn a_newer_entry_whose_blob_is_missing_keeps_the_old_value_in_the_index() 
 }
 
 #[tokio::test]
+async fn a_raw_scan_hands_back_the_stored_bytes_and_the_key() {
+    let node = TestNode::new("raw-scan-bytes").await.unwrap();
+    let docs = node.db.docs("raw-scan-bytes", None).await.unwrap();
+
+    let document = json!({ "_id": "rev/de/aaa", "name": "Alice" });
+    docs.put(Box::new(document.clone())).await.unwrap();
+
+    let rows = docs.scan_raw("rev/").await.unwrap();
+    assert_eq!(rows.len(), 1, "one entry under the prefix: {rows:?}");
+    assert_eq!(rows[0].key, "rev/de/aaa", "the key is the document's `_id`");
+    assert_eq!(
+        rows[0].bytes,
+        serde_json::to_vec(&document).unwrap(),
+        "the plaintext bytes as stored, parsed by nobody"
+    );
+    assert!(rows[0].timestamp > 0, "the entry's timestamp travels with it");
+}
+
+#[tokio::test]
+async fn a_lossy_raw_scan_names_a_key_whose_blob_is_missing() {
+    let node = TestNode::new("raw-scan-missing-blob").await.unwrap();
+    let docs = node.db.docs("raw-scan-missing-blob", None).await.unwrap();
+
+    docs.put(Box::new(json!({ "_id": "rev/de/aaa", "name": "Alice" })))
+        .await
+        .unwrap();
+
+    // The missing-blob setup of the neighbour above: a NEWER entry for the
+    // key whose content this node was never sent.
+    let (doc, author) = own_document(&node, &docs).await;
+    let never_stored = b"a newer payload this node was never sent";
+    doc.set_hash(
+        author,
+        b"rev/de/aaa".to_vec(),
+        Hash::new(never_stored),
+        never_stored.len() as u64,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        docs.scan_raw("rev/").await.is_err(),
+        "the strict raw scan fails on a blob that is not local"
+    );
+    let (rows, missing) = docs.scan_raw_lossy("rev/").await.unwrap();
+    assert!(rows.is_empty(), "no row for the skipped key: {rows:?}");
+    assert_eq!(missing, vec!["rev/de/aaa".to_string()], "the key is named");
+}
+
+#[tokio::test]
 async fn a_key_deleted_in_the_document_leaves_the_index_on_refresh() {
     let node = TestNode::new("refresh-deleted-key").await.unwrap();
     let docs = node.db.docs("refresh-deleted-key", None).await.unwrap();
