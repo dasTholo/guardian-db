@@ -1624,6 +1624,20 @@ impl DocumentStore for DocumentStoreWrapper {
             .put_raw_at(key, bytes, timestamp)
             .await
     }
+
+    async fn keys_under(&self, prefix: &str) -> std::result::Result<Vec<String>, Self::Error> {
+        // The downcast of `scan_docs`, for the same reason.
+        self.store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "keys_under: underlying store is not a GuardianDBDocumentStore".to_string(),
+                )
+            })?
+            .keys_under(prefix)
+            .await
+    }
 }
 
 #[async_trait::async_trait]

@@ -1527,6 +1527,26 @@ impl GuardianDBDocumentStore {
         self.scan_raw_entries(prefix, None).await
     }
 
+    /// The trait method of the same name, on the concrete store: the keys of
+    /// [`Self::scan_raw_entries`]' query, deletion markers left out, without a
+    /// single `cat_bytes` — an entry whose blob is not local still lists its
+    /// key (`DR` §8 S).
+    pub async fn keys_under(&self, prefix: &str) -> Result<Vec<String>> {
+        let _entered = self.span.enter();
+        let entries = self
+            .docs
+            .get_many(
+                &self.doc_handle,
+                Query::single_latest_per_key().key_prefix(prefix).build(),
+            )
+            .await?;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.content_len() > 0)
+            .map(|entry| String::from_utf8_lossy(entry.key()).to_string())
+            .collect())
+    }
+
     /// [`Self::scan_raw`], skipping and naming an entry whose blob is not
     /// local.
     pub async fn scan_raw_lossy(&self, prefix: &str) -> Result<(Vec<RawEntry>, Vec<String>)> {

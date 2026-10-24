@@ -878,6 +878,11 @@ pub trait DocumentStore: Store {
         timestamp: Option<u64>,
     ) -> Result<Placed, Self::Error>;
 
+    /// Every key under `prefix` whose latest entry is not a deletion
+    /// marker — no blob is read (`DR` §8: the arrival of revisions is
+    /// noted by their keys).
+    async fn keys_under(&self, prefix: &str) -> Result<Vec<String>, Self::Error>;
+
     /// Generates a (serialized) `DocTicket` that grants a peer access to synchronize this store.
     ///
     /// Replication capability: the peer must open the store passing the ticket in

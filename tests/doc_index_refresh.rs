@@ -160,6 +160,44 @@ async fn a_lossy_raw_scan_names_a_key_whose_blob_is_missing() {
 }
 
 #[tokio::test]
+async fn keys_under_reads_no_blob() {
+    // `DR` §8 S: the arrival of revisions is noted by their keys — an entry
+    // whose blob is not local still lists its key, a deleted key does not.
+    let node = TestNode::new("keys-under-no-blob").await.unwrap();
+    let docs = node.db.docs("keys-under-no-blob", None).await.unwrap();
+
+    docs.put_raw_at("rev/de/aaa", vec![1], None).await.unwrap();
+    docs.put_raw_at("rev/de/bbb", vec![2], None).await.unwrap();
+    docs.put_raw_at("other/ccc", vec![3], None).await.unwrap();
+
+    let (doc, author) = own_document(&node, &docs).await;
+    let never_stored = b"a revision whose content this node was never sent";
+    doc.set_hash(
+        author,
+        b"rev/de/ddd".to_vec(),
+        Hash::new(never_stored),
+        never_stored.len() as u64,
+    )
+    .await
+    .unwrap();
+    doc.del(author, b"rev/de/bbb".to_vec()).await.unwrap();
+
+    let (_, missing) = docs.scan_raw_lossy("rev/").await.unwrap();
+    assert_eq!(
+        missing,
+        vec!["rev/de/ddd".to_string()],
+        "green first: the blob of rev/de/ddd is not local"
+    );
+    let mut keys = docs.keys_under("rev/").await.unwrap();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["rev/de/aaa".to_string(), "rev/de/ddd".to_string()],
+        "every live key under the prefix, the one without its blob included"
+    );
+}
+
+#[tokio::test]
 async fn a_key_deleted_in_the_document_leaves_the_index_on_refresh() {
     let node = TestNode::new("refresh-deleted-key").await.unwrap();
     let docs = node.db.docs("refresh-deleted-key", None).await.unwrap();
