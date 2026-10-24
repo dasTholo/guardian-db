@@ -1605,6 +1605,25 @@ impl DocumentStore for DocumentStoreWrapper {
         })?;
         store.put_at(*value, timestamp).await
     }
+
+    async fn put_raw_at(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        timestamp: Option<u64>,
+    ) -> std::result::Result<crate::traits::Placed, Self::Error> {
+        // The downcast of `put_at`, for the same reason.
+        self.store
+            .as_any()
+            .downcast_ref::<crate::stores::document_store::GuardianDBDocumentStore>()
+            .ok_or_else(|| {
+                GuardianError::Store(
+                    "put_raw_at: underlying store is not a GuardianDBDocumentStore".to_string(),
+                )
+            })?
+            .put_raw_at(key, bytes, timestamp)
+            .await
+    }
 }
 
 #[async_trait::async_trait]

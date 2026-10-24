@@ -1226,45 +1226,46 @@ impl GuardianDBDocumentStore {
     #[instrument(level = "debug", skip(self, document))]
     pub async fn put_impl(&self, document: Document) -> Result<Operation> {
         self.ensure_writable()?;
-        let _entered = self.span.enter();
-
         let key = (self.doc_opts.key_extractor)(&document)?;
         let data = (self.doc_opts.marshal)(&document)?;
-        let stored = self.encode_value(&key, data.clone())?;
-
-        self.docs
-            .set_bytes(
-                &self.doc_handle,
-                self.author_id,
-                Bytes::from(key.clone().into_bytes()),
-                Bytes::from(stored.clone()),
-            )
-            .await
-            .map_err(|e| {
-                GuardianError::Store(format!("Error writing key '{}' to iroh-docs: {}", key, e))
-            })?;
-
-        self.index.insert(key.clone(), stored);
+        self.put_raw_at(&key, data.clone(), None).await?;
         Ok(Operation::new(Some(key), "PUT".to_string(), Some(data)))
     }
 
-    /// [`Self::put_impl`] at a STATED entry timestamp (`SR` §3.2).
-    ///
-    /// The index takes the value only when this entry is now the latest at its
-    /// key: the copy writes rows OLDER than now, and another author's newer entry
-    /// — a deletion marker the copy's absent-check cannot see — must keep winning
-    /// in the index as it does in the document.
-    ///
-    /// The own-deletion-marker pre-check and its limits (D9), and the effect on
-    /// this author's head in `latest_per_author` (may be lowered until the
-    /// author's next ordinary write) and on delivery to joined peers (not
-    /// gossiped, D10): see `WillowDocs::set_bytes_at`.
-    pub async fn put_at(&self, document: Document, timestamp: u64) -> Result<Placed> {
+    /// Write `bytes` at `key` as they are (`DR` §6 N9): the store's payload
+    /// codec ([`Self::encode_value`]) applied, nothing marshalled, no key read
+    /// out of a document. `None` writes now and always answers
+    /// [`Placed::Written`] — [`Self::put_impl`]'s write; `Some(t)` writes at
+    /// `t` with [`Self::put_at`]'s rules. Both of those call this after their
+    /// marshal, so the three are one write path.
+    pub async fn put_raw_at(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        timestamp: Option<u64>,
+    ) -> Result<Placed> {
         self.ensure_writable()?;
         let _entered = self.span.enter();
-        let key = (self.doc_opts.key_extractor)(&document)?;
-        let data = (self.doc_opts.marshal)(&document)?;
-        let stored = self.encode_value(&key, data)?;
+        let stored = self.encode_value(key, bytes)?;
+        let key = key.to_string();
+        let Some(timestamp) = timestamp else {
+            self.docs
+                .set_bytes(
+                    &self.doc_handle,
+                    self.author_id,
+                    Bytes::from(key.clone().into_bytes()),
+                    Bytes::from(stored.clone()),
+                )
+                .await
+                .map_err(|e| {
+                    GuardianError::Store(format!(
+                        "Error writing key '{}' to iroh-docs: {}",
+                        key, e
+                    ))
+                })?;
+            self.index.insert(key, stored);
+            return Ok(Placed::Written);
+        };
         let own = *self.client.node_id().as_bytes();
         let placed = self
             .docs
@@ -1296,6 +1297,24 @@ impl GuardianDBDocumentStore {
             }
         }
         Ok(placed)
+    }
+
+    /// [`Self::put_impl`] at a STATED entry timestamp (`SR` §3.2).
+    ///
+    /// The index takes the value only when this entry is now the latest at its
+    /// key: the copy writes rows OLDER than now, and another author's newer entry
+    /// — a deletion marker the copy's absent-check cannot see — must keep winning
+    /// in the index as it does in the document.
+    ///
+    /// The own-deletion-marker pre-check and its limits (D9), and the effect on
+    /// this author's head in `latest_per_author` (may be lowered until the
+    /// author's next ordinary write) and on delivery to joined peers (not
+    /// gossiped, D10): see `WillowDocs::set_bytes_at`.
+    pub async fn put_at(&self, document: Document, timestamp: u64) -> Result<Placed> {
+        self.ensure_writable()?;
+        let key = (self.doc_opts.key_extractor)(&document)?;
+        let data = (self.doc_opts.marshal)(&document)?;
+        self.put_raw_at(&key, data, Some(timestamp)).await
     }
 
     /// `&self` variant of [`delete`](Self::delete). See [`put_impl`](Self::put_impl).

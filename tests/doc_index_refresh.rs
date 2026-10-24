@@ -105,6 +105,30 @@ async fn a_raw_scan_hands_back_the_stored_bytes_and_the_key() {
 }
 
 #[tokio::test]
+async fn a_raw_write_reads_back_byte_for_byte() {
+    // `DR` §6 K2, N9: bytes at a key, no marshal and no key read out of a
+    // document — and under `--features encryption` the store's payload
+    // codec applied on the way in and taken off on the way out.
+    let node = TestNode::new("raw-write-bytes").await.unwrap();
+    let docs = node.db.docs("raw-write-bytes", None).await.unwrap();
+
+    let placed = docs.put_raw_at("k/1", vec![1, 0, 255], None).await.unwrap();
+    assert_eq!(placed, guardian_db::traits::Placed::Written);
+    let rows = docs.scan_raw("k/").await.unwrap();
+    assert_eq!(rows.len(), 1, "one entry under the prefix: {rows:?}");
+    assert_eq!(rows[0].key, "k/1", "the key as given");
+    assert_eq!(rows[0].bytes, vec![1, 0, 255], "the bytes as given");
+
+    let t = rows[0].timestamp - 1_000;
+    let placed = docs.put_raw_at("k/2", vec![7], Some(t)).await.unwrap();
+    assert_eq!(placed, guardian_db::traits::Placed::Written);
+    let rows = docs.scan_raw("k/2").await.unwrap();
+    assert_eq!(rows.len(), 1, "one entry at the key: {rows:?}");
+    assert_eq!(rows[0].bytes, vec![7]);
+    assert_eq!(rows[0].timestamp, t, "a stated timestamp is kept");
+}
+
+#[tokio::test]
 async fn a_lossy_raw_scan_names_a_key_whose_blob_is_missing() {
     let node = TestNode::new("raw-scan-missing-blob").await.unwrap();
     let docs = node.db.docs("raw-scan-missing-blob", None).await.unwrap();

@@ -867,6 +867,17 @@ pub trait DocumentStore: Store {
     /// explicitly; the rotation runs offline and relies on the next start's join.
     async fn put_at(&self, document: Document, timestamp: u64) -> Result<Placed, Self::Error>;
 
+    /// Write `bytes` at `key` as they are — the store's payload codec
+    /// applied, nothing marshalled, no key read out of a document
+    /// (`DR` §6 N9). `None` writes now, `Some(t)` at `t` with
+    /// [`Self::put_at`]'s rules.
+    async fn put_raw_at(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        timestamp: Option<u64>,
+    ) -> Result<Placed, Self::Error>;
+
     /// Generates a (serialized) `DocTicket` that grants a peer access to synchronize this store.
     ///
     /// Replication capability: the peer must open the store passing the ticket in
