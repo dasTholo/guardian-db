@@ -945,6 +945,16 @@ impl IrohBackend {
             debug!("Tags listed to force a sync");
         }
 
+        // 2b. Shut the blob store down and wait for its database to close.
+        // Dropping an FsStore closes the database in the background
+        // (iroh-blobs #252/#260 fix), so only this awaited call guarantees a
+        // reopen of the same directory succeeds after shutdown returns.
+        if let Ok(store) = self.get_store_for_blobs().await {
+            if let Err(e) = store.read().await.shutdown().await {
+                warn!("Blob store shutdown failed: {}", e);
+            }
+        }
+
         // 3. Wait a bit to ensure asynchronous operations finish.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
