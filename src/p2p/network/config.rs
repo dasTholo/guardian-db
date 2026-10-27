@@ -2,7 +2,7 @@
 //
 // Centralizes all configuration options for the native Iroh client.
 // Focuses on iroh-blobs (storage) and iroh-gossip (pubsub).
-// Uses discovery via Pkarr/DNS/mDNS.
+// Uses discovery via n0 (Pkarr/DNS) or mDNS.
 
 use iroh::EndpointId as NodeId;
 use iroh::RelayUrl;
@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use url::Url;
 
 /// Complete configuration for the Iroh client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,12 +52,6 @@ pub struct ClientConfig {
     /// together. Empty in every preset: nothing changes for a caller naming none.
     #[serde(default)]
     pub relays: Vec<RelaySpec>,
-
-    /// This network's own pkarr lookup service (`…/pkarr`): the endpoint publishes
-    /// its id with its home relay there and resolves a peer's id there. `None` in
-    /// every preset.
-    #[serde(default)]
-    pub pkarr_url: Option<Url>,
 
     /// Iroh networking settings.
     pub network: NetworkConfig,
@@ -144,7 +137,6 @@ impl Default for ClientConfig {
             enable_discovery_n0: true,   // Discovery via Pkarr/DNS.
             enable_discovery_mdns: true, // Local discovery.
             relays: Vec::new(),
-            pkarr_url: None,
             network: NetworkConfig::default(),
             storage: StorageConfig::default(),
             gossip: GossipConfig::default(),
@@ -166,7 +158,6 @@ impl ClientConfig {
             enable_discovery_n0: false,  // Disabled for local dev.
             enable_discovery_mdns: true, // Local discovery only.
             relays: Vec::new(),
-            pkarr_url: None,
             network: NetworkConfig::development(),
             storage: StorageConfig::development(),
             gossip: GossipConfig::development(),
@@ -186,7 +177,6 @@ impl ClientConfig {
             enable_discovery_n0: true,   // Global discovery via n0.computer.
             enable_discovery_mdns: true, // Local discovery as well.
             relays: Vec::new(),
-            pkarr_url: None,
             network: NetworkConfig::production(),
             storage: StorageConfig::production(),
             gossip: GossipConfig::production(),
@@ -206,7 +196,6 @@ impl ClientConfig {
             enable_discovery_n0: false,
             enable_discovery_mdns: false,
             relays: Vec::new(),
-            pkarr_url: None,
             network: NetworkConfig::testing(),
             storage: StorageConfig::testing(),
             gossip: GossipConfig::testing(),
@@ -267,11 +256,11 @@ impl ClientConfig {
         }
 
         // One source per question (`RN` §2): with n0 on, `initialize_node` builds
-        // `presets::N0` and never reads the two fields, so a configuration naming both
-        // would promise services it does not use.
-        if self.enable_discovery_n0 && (!self.relays.is_empty() || self.pkarr_url.is_some()) {
+        // `presets::N0` and never reads `relays`, so a configuration naming both
+        // would promise relays it does not use.
+        if self.enable_discovery_n0 && !self.relays.is_empty() {
             return Err(
-                "enable_discovery_n0 together with relays or pkarr_url: two sources for one question"
+                "enable_discovery_n0 together with relays: two sources for one question"
                     .to_string(),
             );
         }
@@ -284,19 +273,21 @@ impl ClientConfig {
         self.data_store_path.is_some()
     }
 
-    /// Returns whether any address lookup is enabled: n0, mDNS, or this network's own
-    /// pkarr service (`RN`).
+    /// Returns whether any built-in address lookup is enabled: n0 or mDNS. A lookup
+    /// the caller adds to the endpoint after bind (the Mainline DHT, `EV` §5.3) is
+    /// not counted here.
     pub fn has_discovery_enabled(&self) -> bool {
-        self.enable_discovery_n0 || self.enable_discovery_mdns || self.pkarr_url.is_some()
+        self.enable_discovery_n0 || self.enable_discovery_mdns
     }
 }
 
 /// One relay a node uses, and the token it is admitted by (`RN` §2).
 ///
 /// The token travels as `Authorization: Bearer` (`iroh::RelayConfig::with_auth_token`),
-/// NOT in the URL: a relay URL is published with every node's pkarr record
-/// (`url.to_string()`, iroh-dns 1.3.0 `endpoint_info.rs`), so a `?token=` there would
-/// stand in public DNS. `Debug` prints `<redacted>` in its place.
+/// NOT in the URL: a relay URL is published with every node's address record (n0's
+/// pkarr record, `url.to_string()`, iroh-dns 1.3.0 `endpoint_info.rs`; or the
+/// Mainline DHT record, `EV` §5.3), so a `?token=` there would stand in public.
+/// `Debug` prints `<redacted>` in its place.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelaySpec {
     /// Where the relay is dialled.
@@ -643,13 +634,6 @@ mod tests {
         // Without discovery.
         let without_discovery = ClientConfig::offline();
         assert!(!without_discovery.has_discovery_enabled());
-
-        // `RN`: a pkarr lookup service is an address lookup of its own, mDNS or not.
-        let with_pkarr = ClientConfig {
-            pkarr_url: Some("https://dns.example.org/pkarr".parse().unwrap()),
-            ..ClientConfig::offline()
-        };
-        assert!(with_pkarr.has_discovery_enabled());
     }
 
     /// `RN` §2: the token never reaches a `Debug` line.
@@ -675,7 +659,6 @@ mod tests {
             ("offline", ClientConfig::offline()),
         ] {
             assert!(config.relays.is_empty(), "{name}() names a relay");
-            assert_eq!(config.pkarr_url, None, "{name}() names a lookup service");
         }
     }
 
@@ -688,11 +671,8 @@ mod tests {
             auth_token: None,
         }];
         assert!(with_relay.validate().is_err());
-        let mut with_pkarr = ClientConfig::production();
-        with_pkarr.pkarr_url = Some("https://dns.example.org/pkarr".parse().unwrap());
-        assert!(with_pkarr.validate().is_err());
-        with_pkarr.enable_discovery_n0 = false;
-        assert!(with_pkarr.validate().is_ok());
+        with_relay.enable_discovery_n0 = false;
+        assert!(with_relay.validate().is_ok());
     }
 
     /// No preset collects garbage: the store opens as it always did.

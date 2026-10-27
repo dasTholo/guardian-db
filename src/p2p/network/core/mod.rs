@@ -12,7 +12,6 @@ use crate::p2p::network::{
 };
 use bytes::Bytes;
 use iroh::SecretKey;
-use iroh::address_lookup::pkarr::{PkarrPublisher, PkarrResolver};
 use iroh::endpoint::{BindOpts, Endpoint};
 use iroh::protocol::Router;
 use iroh::{EndpointAddr as NodeAddr, EndpointId as NodeId};
@@ -646,11 +645,10 @@ impl IrohBackend {
         // and returns a plain `Builder`, so the two presets are two arguments and
         // never one value.
         //
-        // And a THIRD way since `RN` (§2): `Minimal` plus the services the configuration
-        // NAMES — this network's own relays and its own pkarr lookup service, and nothing
-        // else. With neither named it is the closed deployment above. The publisher keeps
-        // its default filter (`AddrFilter::relay_only`): it publishes the home relay and
-        // NO direct IP address.
+        // And a THIRD way since `RN` (§2): `Minimal` plus the relays the configuration
+        // NAMES, and nothing else. With none named it is the closed deployment above.
+        // No lookup service is built here (`EV` §5.3): the caller adds its own address
+        // lookup after bind through `Endpoint::address_lookup`, as mDNS is added below.
         let builder = if self.config.enable_discovery_n0 {
             Endpoint::builder(iroh::endpoint::presets::N0)
         } else {
@@ -671,11 +669,6 @@ impl IrohBackend {
                 let mut net_report = iroh::endpoint::NetReportConfig::default();
                 net_report.captive_portal_check = false;
                 builder = builder.net_report_config(net_report);
-            }
-            if let Some(url) = &self.config.pkarr_url {
-                builder = builder
-                    .address_lookup(PkarrPublisher::builder(url.clone()))
-                    .address_lookup(PkarrResolver::builder(url.clone()));
             }
             builder
         };
@@ -900,20 +893,21 @@ impl IrohBackend {
         }
 
         // Address lookup follows `ClientConfig`: `enable_discovery_n0` picks the
-        // endpoint preset, `enable_discovery_mdns` decides the LAN lookup and
-        // `pkarr_url` names this network's own lookup service beside its `relays`
+        // endpoint preset and `enable_discovery_mdns` decides the LAN lookup
         // (`initialize_node` above). A node built from `testing()` resolves
-        // nothing and must be handed addresses — see `Endpoint::add_node_addr`.
+        // nothing and must be handed addresses — see `Endpoint::add_node_addr` —
+        // unless its caller adds a lookup of its own after bind (`EV` §5.3).
         if self.config.has_discovery_enabled() {
             info!(
-                "Iroh backend initialized; address lookup: n0={} mdns={} relays={} pkarr={}",
+                "Iroh backend initialized; address lookup: n0={} mdns={} relays={}",
                 self.config.enable_discovery_n0,
                 self.config.enable_discovery_mdns,
                 self.config.relays.len(),
-                self.config.pkarr_url.is_some()
             );
         } else {
-            info!("Iroh backend initialized with NO address lookup — peers must be stated by address");
+            info!(
+                "Iroh backend initialized with NO built-in address lookup — peers must be stated by address or found by a lookup added after bind"
+            );
         }
         Ok(())
     }

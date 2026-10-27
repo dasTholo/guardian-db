@@ -103,12 +103,12 @@ rag = ["embedding", "compute-llm"]
 # implementations. Off by default: enabling it changes no default behaviour, it
 # only makes the implementations available to opt into.
 encryption = ["dep:chacha20poly1305"]
-# In-process stand-ins for the relay and the pkarr lookup service a node can be
-# configured with (`p2p::network::test_services`, `RN` §6). TEST-ONLY: the root
-# switches it on through `noosphere-guardiandb/test-support`, a dev edge, and the
-# fork's own tests through the self dev-dependency below — no release build carries
-# an iroh relay server.
-test-services = ["dep:iroh-relay", "dep:axum"]
+# An in-process stand-in for the relay a node can be configured with
+# (`p2p::network::test_services`, `RN` §6; the pkarr stand-in went with the own
+# lookup service, `EV` §5.3). TEST-ONLY: the root switches it on through
+# `noosphere-guardiandb/test-support`, a dev edge, and the fork's own tests through
+# the self dev-dependency below — no release build carries an iroh relay server.
+test-services = ["dep:iroh-relay"]
 
 [dependencies]
 
@@ -151,9 +151,6 @@ iroh-blobs = "0.103"
 iroh-gossip = "0.101"
 iroh-docs = "0.101"
 iroh-mdns-address-lookup = "0.6"
-# The lookup-service URL of `ClientConfig` (`RN` §2); `serde` because `ClientConfig`
-# derives it. Already in the tree through iroh.
-url = { version = "2.5.8", features = ["serde"] }
 iroh-relay = { version = "1.4", optional = true, features = ["server"] } # `test-services`
 
 # Storage & caching
