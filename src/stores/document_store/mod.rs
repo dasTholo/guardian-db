@@ -9,6 +9,7 @@ use crate::log::identity::Identity;
 use crate::log::lamport_clock::LamportClock;
 use crate::p2p::network::client::IrohClient;
 use crate::p2p::network::core::docs::WillowDocs;
+use crate::stores::live_refresh::LiveTask;
 use crate::stores::operation::Operation;
 use crate::stores::payload_codec::{RecordCtx, SharedPayloadCodec, codec_or_identity};
 use crate::traits::{
@@ -416,6 +417,8 @@ pub struct GuardianDBDocumentStore {
     /// `unmarshal`, so the codec sees serialized documents and the index mirrors the
     /// **stored** form. See [`crate::stores::payload_codec`].
     payload_codec: SharedPayloadCodec,
+    /// The live index task; `close` ends it — noosphere `KB` §6.4.
+    live: LiveTask,
 }
 
 #[async_trait::async_trait]
@@ -429,6 +432,7 @@ impl Store for GuardianDBDocumentStore {
 
     async fn close(&self) -> std::result::Result<(), Self::Error> {
         debug!("Starting DocumentStore close operation (iroh-docs backend)");
+        self.live.stop().await;
         if let Err(e) = self.docs.close_doc(&self.doc_handle).await {
             warn!("Failed to close iroh-docs document: {:?}", e);
         }
@@ -681,7 +685,7 @@ impl GuardianDBDocumentStore {
         let client = self.client.clone();
         let index = self.index.clone();
 
-        tokio::spawn(async move {
+        self.live.start(async move {
             let stream = match doc.subscribe().await {
                 Ok(s) => s,
                 Err(e) => {
@@ -983,6 +987,7 @@ impl GuardianDBDocumentStore {
             blob_store,
             writable,
             payload_codec: codec_or_identity(options.payload_codec),
+            live: LiveTask::default(),
         };
 
         // Synchronize the local index with the iroh-docs document state.

@@ -2243,6 +2243,14 @@ impl IrohBackend {
         })
     }
 
+    /// Empties the optimized cache (noosphere `KB` §6.4). `shutdown` does
+    /// it at its end; a caller that shuts the node down through the
+    /// router instead calls this after `Router::shutdown`, since the
+    /// backend outlives the shutdown while background tasks hold it.
+    pub async fn clear_cache(&self) -> Result<()> {
+        self.optimized_cache.clear().await
+    }
+
     /// Runs automatic performance optimization.
     pub async fn optimize_performance(&self) -> Result<()> {
         debug!("Starting automatic performance optimization");

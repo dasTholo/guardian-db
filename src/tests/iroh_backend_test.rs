@@ -432,6 +432,45 @@ async fn test_cache_hit() {
     assert!(second_duration <= first_duration);
 }
 
+/// noosphere `KB` §6.4, KB17: `clear_cache` empties the optimized
+/// cache — `Node::close` calls it, because the backend outlives the
+/// close — and the content stays readable from the store.
+#[tokio::test]
+async fn test_clear_cache_empties_the_optimized_cache() {
+    let (backend, _temp_dir) = create_test_backend().await;
+    let reader = Box::pin(Cursor::new(b"Cache clear test data".to_vec()));
+    let hash = backend.add(reader).await.expect("Failed to add").hash;
+    let before = backend
+        .get_cache_statistics()
+        .await
+        .unwrap()
+        .total_size_bytes;
+    assert!(before > 0, "the control: add fills the cache ({before})");
+
+    backend
+        .clear_cache()
+        .await
+        .expect("Failed to clear the cache");
+
+    assert_eq!(
+        backend
+            .get_cache_statistics()
+            .await
+            .unwrap()
+            .total_size_bytes,
+        0
+    );
+    let mut again = Vec::new();
+    backend
+        .cat(&hash)
+        .await
+        .expect("Failed to cat")
+        .read_to_end(&mut again)
+        .await
+        .unwrap();
+    assert_eq!(again, b"Cache clear test data", "the store still holds it");
+}
+
 #[tokio::test]
 async fn test_cache_statistics() {
     let (backend, _temp_dir) = create_test_backend().await;

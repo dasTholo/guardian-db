@@ -8,6 +8,7 @@ use crate::guardian::error::{GuardianError, Result};
 use crate::log::identity::Identity;
 use crate::log::lamport_clock::LamportClock;
 use crate::p2p::network::core::docs::WillowDocs;
+use crate::stores::live_refresh::LiveTask;
 use crate::stores::operation::Operation;
 use crate::stores::payload_codec::{RecordCtx, SharedPayloadCodec, codec_or_identity};
 use crate::traits::{KeyValueStore, NewStoreOptions, Store, StoreIndex, TracerWrapper};
@@ -336,6 +337,8 @@ pub struct GuardianDBKeyValue {
     /// **stored** (encoded) bytes, so reads decode and writes encode — see the module docs
     /// of [`crate::stores::payload_codec`].
     payload_codec: SharedPayloadCodec,
+    /// The live index task; `close` ends it — noosphere `KB` §6.4.
+    live: LiveTask,
 }
 
 #[async_trait::async_trait]
@@ -349,6 +352,7 @@ impl Store for GuardianDBKeyValue {
 
     async fn close(&self) -> Result<()> {
         debug!("Starting KeyValue store close operation (iroh-docs backend)");
+        self.live.stop().await;
 
         // Close the iroh-docs document.
         if let Err(e) = self.docs.close_doc(&self.doc_handle).await {
@@ -749,7 +753,7 @@ impl GuardianDBKeyValue {
         let client = self.client.clone();
         let index = self.index.clone();
 
-        tokio::spawn(async move {
+        self.live.start(async move {
             let stream = match doc.subscribe().await {
                 Ok(s) => s,
                 Err(e) => {
@@ -1157,6 +1161,7 @@ impl GuardianDBKeyValue {
             empty_log,
             writable,
             payload_codec: codec_or_identity(opts.payload_codec),
+            live: LiveTask::default(),
         };
 
         // Synchronize the local index with the iroh-docs document state.

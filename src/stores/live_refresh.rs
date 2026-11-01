@@ -60,6 +60,43 @@ where
     tokio::join!(drain, refreshes);
 }
 
+/// A store's live index task and the way to end it (noosphere `KB` §6.4).
+/// Detached, the task outlived `close`: a peer's event after the document
+/// closed started a refresh whose `get_many` met „document is closed“.
+#[derive(Default)]
+pub(crate) struct LiveTask {
+    stop: tokio_util::sync::CancellationToken,
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl LiveTask {
+    /// Spawn `work`; it runs until it ends or [`Self::stop`] is called.
+    pub(crate) fn start(&self, work: impl Future<Output = ()> + Send + 'static) {
+        let stop = self.stop.clone();
+        let handle = tokio::spawn(async move {
+            let _ = stop.run_until_cancelled(work).await;
+        });
+        *self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    /// End the task and return once it HAS ended — a refresh in flight is
+    /// dropped, none starts after. A second call returns at once.
+    pub(crate) async fn stop(&self) {
+        self.stop.cancel();
+        let handle = self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +190,30 @@ mod tests {
         })
         .await;
         assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    /// noosphere `KB` §6.4: once `stop` returns the task has ended — an event
+    /// after it refreshes nothing.
+    #[tokio::test]
+    async fn a_stopped_live_task_refreshes_nothing_after_stop_returns() {
+        let (mut tx, rx) = fmpsc::channel::<()>(8);
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let counted = refreshes.clone();
+        let live = LiveTask::default();
+        live.start(refresh_on_events(rx, |_| true, move || {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        tx.send(()).await.unwrap();
+        while refreshes.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        live.stop().await;
+        let _ = tx.send(()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        live.stop().await;
     }
 }
