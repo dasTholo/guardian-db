@@ -933,6 +933,19 @@ impl IrohBackend {
             }
         }
 
+        // 1b. Shut the router down and wait for its protocol handlers. The
+        // docs handler's actor holds `iroh_docs/docs.redb`; left to the router
+        // task, it is dropped only after that task notices the closed
+        // endpoint, so a reopen of the same directory right after shutdown
+        // could still find the database open.
+        // Taken out first: the lock is not held while the handlers shut down.
+        let router = self.router.write().await.take();
+        if let Some(router) = router {
+            if let Err(e) = router.shutdown().await {
+                warn!("Router shutdown failed: {}", e);
+            }
+        }
+
         // 2. Force a flush of pending tags by performing a read.
         // This helps ensure the SQLite WAL is synchronized.
         if (self.pin_ls().await).is_ok() {
