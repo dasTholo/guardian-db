@@ -117,7 +117,7 @@ async-trait = "0.1.92"
 async-stream = "0.3.6"
 futures = "0.3.34"
 futures-lite = "2.6.1"
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 parking_lot = "0.13"
@@ -147,7 +147,7 @@ chacha20poly1305 = { version = "0.11.0", optional = true } # `encryption` (XChaC
 # P2P networking (Iroh)
 iroh = "1.4"
 iroh-io = "0.6.2"
-iroh-blobs = "0.103"
+iroh-blobs = "0.104"
 iroh-gossip = "0.101"
 iroh-docs = "0.101"
 iroh-mdns-address-lookup = "0.6"
@@ -386,3 +386,12 @@ members = [
     "guardian-compute-sdk-macros",
 ]
 resolver = "2"
+
+# This fork runs only as noosphere's submodule (`vendor/guardian-db`), next to
+# noosphere's patched `vendor/iroh-docs`. The patch makes the fork's standalone
+# gate measure that same iroh-docs instead of crates.io 0.101.0, which still
+# pulls iroh-blobs 0.103.1 and so a second, incompatible `Hash` type
+# (noosphere `KB` §12). Inside noosphere's workspace cargo ignores this
+# section; noosphere's root `[patch.crates-io]` applies there.
+[patch.crates-io]
+iroh-docs = { path = "../iroh-docs" }
