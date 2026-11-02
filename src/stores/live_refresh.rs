@@ -71,6 +71,11 @@ pub(crate) struct LiveTask {
 
 impl LiveTask {
     /// Spawn `work`; it runs until it ends or [`Self::stop`] is called.
+    ///
+    /// Start once, stop once: a second `start` overwrites the handle, so
+    /// `stop` would no longer wait for the first task, and a `start` after
+    /// `stop` is cancelled at once, the token stays cancelled. A store
+    /// starts its task once in `spawn_live_index_sync` and stops it in `close`.
     pub(crate) fn start(&self, work: impl Future<Output = ()> + Send + 'static) {
         let stop = self.stop.clone();
         let handle = tokio::spawn(async move {
