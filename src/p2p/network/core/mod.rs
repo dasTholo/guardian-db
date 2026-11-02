@@ -595,8 +595,8 @@ impl IrohBackend {
 
         // Initialize the FsStore with persistence — with garbage collection only
         // when the caller set one up (`ClientConfig::gc`). `load_with_opts` takes
-        // the redb file `FsStore::load` uses (`<root>/blobs.db`, iroh-blobs 0.103.1
-        // `fs.rs`), so an existing store opens with its content. The protect
+        // the redb file `FsStore::load` uses (`<root>/blobs.db`, iroh-blobs 0.104.0
+        // `store/fs.rs:1414-1418`), so an existing store opens with its content. The protect
         // callback is the slot's forwarder: until the caller fills the slot every
         // run aborts, and iroh-docs' stock handler is NOT used (`Engine::spawn`
         // below gets `None`) — it would pin every entry of every replica.
