@@ -826,6 +826,10 @@ mod tests {
         assert!(!replica.is_writable(), "a read ticket gives no write access");
         let captured = log.text();
         assert!(
+            captured.contains("read-only replica: not registered as ticket provider"),
+            "the capture must have seen the constructor's debug line, log was:\n{captured}"
+        );
+        assert!(
             !captured.contains("Failed to generate share tickets"),
             "a read-only replica must not try to mint share tickets, log was:\n{captured}"
         );

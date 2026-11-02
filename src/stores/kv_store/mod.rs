@@ -1195,32 +1195,29 @@ impl GuardianDBKeyValue {
         // refuses to mint the write ticket for it, so it is not a provider (noosphere KB §12
         // "Nur-Lese-Kopie ohne Share-Ticket", test
         // `a_read_only_import_does_not_try_to_mint_a_write_ticket`).
-        let tickets = if doc_is_writable {
-            Some(store.share_tickets().await)
+        if doc_is_writable {
+            match store.share_tickets().await {
+                Ok((read_ticket, write_ticket)) => {
+                    store
+                        .client
+                        .backend()
+                        .register_ticket_provider(
+                            store_key,
+                            read_ticket,
+                            write_ticket,
+                            access_controller_for_registry,
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to generate share tickets, store not registered for exchange: {:?}",
+                        e
+                    );
+                }
+            }
         } else {
             debug!("read-only replica: not registered as ticket provider");
-            None
-        };
-        match tickets {
-            None => {}
-            Some(Ok((read_ticket, write_ticket))) => {
-                store
-                    .client
-                    .backend()
-                    .register_ticket_provider(
-                        store_key,
-                        read_ticket,
-                        write_ticket,
-                        access_controller_for_registry,
-                    )
-                    .await;
-            }
-            Some(Err(e)) => {
-                warn!(
-                    "Failed to generate share tickets, store not registered for exchange: {:?}",
-                    e
-                );
-            }
         }
 
         info!(
