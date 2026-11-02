@@ -20,6 +20,7 @@ pub mod identity_verification_test;
 pub mod iroh_access_controller_test;
 pub mod iroh_backend_test;
 pub mod kv_store_test;
+pub mod log_capture;
 pub mod manifest_test;
 pub mod networking_metrics_test;
 pub mod optimized_cache_test;

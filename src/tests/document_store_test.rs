@@ -794,4 +794,40 @@ mod tests {
         assert_eq!(results.len(), 1, "the document only");
         assert_eq!(results[0]["_id"], "doc1");
     }
+
+    /// A replica imported with a read ticket holds no write secret, so iroh-docs refuses to
+    /// mint a write ticket for it: the constructor must not try, and must not warn about it
+    /// (noosphere KB §12 "Nur-Lese-Kopie ohne Share-Ticket").
+    #[tokio::test]
+    async fn a_read_only_import_does_not_try_to_mint_a_write_ticket() {
+        let (origin, _origin_dir) = create_test_store().await.expect("origin store");
+        let (read_ticket, _write_ticket) = origin.share_tickets().await.expect("origin tickets");
+
+        let (log, _guard) = crate::tests::log_capture::LogCapture::install();
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let client_config = ClientConfig {
+            data_store_path: Some(temp_dir.path().to_path_buf()),
+            ..ClientConfig::development()
+        };
+        let client = Arc::new(IrohClient::new(client_config).await.expect("client"));
+        let options = NewStoreOptions {
+            event_bus: Some(EventBus::new()),
+            directory: temp_dir.path().join("cache").to_string_lossy().to_string(),
+            doc_ticket: Some(read_ticket),
+            read_only: Some(true),
+            ..Default::default()
+        };
+        let replica =
+            GuardianDBDocumentStore::new(client, test_identity(), test_address().await, options)
+                .await
+                .expect("import the read ticket");
+
+        assert!(!replica.is_writable(), "a read ticket gives no write access");
+        let captured = log.text();
+        assert!(
+            !captured.contains("Failed to generate share tickets"),
+            "a read-only replica must not try to mint share tickets, log was:\n{captured}"
+        );
+    }
 }

@@ -1015,8 +1015,20 @@ impl GuardianDBDocumentStore {
         // Register this store as a DocTicket provider for authorized peers (automatic exchange).
         // The capability is gated per requester by the AccessController: write-authorized peers
         // get the write ticket (namespace secret), read-only peers get the read ticket.
-        match store.share_tickets().await {
-            Ok((read_ticket, write_ticket)) => {
+        //
+        // A replica imported with a read ticket holds no namespace write secret, and iroh-docs
+        // refuses to mint the write ticket for it, so it is not a provider (noosphere KB §12
+        // "Nur-Lese-Kopie ohne Share-Ticket", test
+        // `a_read_only_import_does_not_try_to_mint_a_write_ticket`).
+        let tickets = if doc_is_writable {
+            Some(store.share_tickets().await)
+        } else {
+            debug!("read-only replica: not registered as ticket provider");
+            None
+        };
+        match tickets {
+            None => {}
+            Some(Ok((read_ticket, write_ticket))) => {
                 store
                     .client
                     .backend()
@@ -1028,7 +1040,7 @@ impl GuardianDBDocumentStore {
                     )
                     .await;
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 warn!(
                     "Failed to generate share tickets, store not registered for exchange: {:?}",
                     e
