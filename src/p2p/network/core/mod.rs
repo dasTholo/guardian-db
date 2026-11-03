@@ -530,7 +530,16 @@ impl IrohBackend {
             compute_reputation: Arc::new(crate::compute::ReputationBook::new()),
         };
         // Initialize the Iroh node asynchronously.
-        backend.initialize_node().await?;
+        // A failed start leaves nothing open (`SE` §2.1 in noosphere): a start retried in
+        // the same process — the desktop's TRY AGAIN and its way back to the last running
+        // file — needs `iroh_store/blobs.db` and `iroh_docs/docs.redb` free when this error
+        // returns. Dropping an `FsStore` closes its database only in the background (see
+        // `shutdown`, step 2b), so the parts are closed and awaited here.
+        if let Err(e) = backend.initialize_node().await {
+            backend.close_network().await;
+            backend.close_store().await;
+            return Err(e);
+        }
         info!(
             "Optimized Iroh backend initialized successfully at {:?}",
             data_dir_clone
@@ -920,31 +929,11 @@ impl IrohBackend {
     pub async fn shutdown(&self) -> Result<()> {
         debug!("Starting IrohBackend shutdown");
 
-        // 1. Stop accepting new connections on the endpoint.
-        if let Ok(endpoint_arc) = self.get_endpoint().await {
-            let endpoint_lock = endpoint_arc.read().await;
-            if let Some(endpoint) = endpoint_lock.as_ref() {
-                // Wait a bit for pending operations.
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait a bit for pending operations.
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-                // Close all active connections.
-                endpoint.close().await;
-                debug!("Endpoint closed");
-            }
-        }
-
-        // 1b. Shut the router down and wait for its protocol handlers. The
-        // docs handler's actor holds `iroh_docs/docs.redb`; left to the router
-        // task, it is dropped only after that task notices the closed
-        // endpoint, so a reopen of the same directory right after shutdown
-        // could still find the database open.
-        // Taken out first: the lock is not held while the handlers shut down.
-        let router = self.router.write().await.take();
-        if let Some(router) = router {
-            if let Err(e) = router.shutdown().await {
-                warn!("Router shutdown failed: {}", e);
-            }
-        }
+        // 1. and 1b. The endpoint, the router and its protocol handlers.
+        self.close_network().await;
 
         // 2. Force a flush of pending tags by performing a read.
         // This helps ensure the SQLite WAL is synchronized.
@@ -952,15 +941,8 @@ impl IrohBackend {
             debug!("Tags listed to force a sync");
         }
 
-        // 2b. Shut the blob store down and wait for its database to close.
-        // Dropping an FsStore closes the database in the background
-        // (iroh-blobs #252/#260 fix), so only this awaited call guarantees a
-        // reopen of the same directory succeeds after shutdown returns.
-        if let Ok(store) = self.get_store_for_blobs().await {
-            if let Err(e) = store.read().await.shutdown().await {
-                warn!("Blob store shutdown failed: {}", e);
-            }
-        }
+        // 2b. The blob store.
+        self.close_store().await;
 
         // 3. Wait a bit to ensure asynchronous operations finish.
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -978,6 +960,63 @@ impl IrohBackend {
 
         info!("IrohBackend shutdown complete");
         Ok(())
+    }
+
+    /// Closes the network half of the node: the endpoint, the router and its
+    /// protocol handlers — shared by `shutdown` and a failed start in `new`.
+    /// Every failure is logged, none returned.
+    async fn close_network(&self) {
+        // 1. Stop accepting new connections on the endpoint.
+        if let Ok(endpoint_arc) = self.get_endpoint().await {
+            let endpoint_lock = endpoint_arc.read().await;
+            if let Some(endpoint) = endpoint_lock.as_ref() {
+                // Close all active connections.
+                endpoint.close().await;
+                debug!("Endpoint closed");
+            }
+        }
+
+        // 1b. Shut the router down and wait for its protocol handlers. The
+        // docs handler's actor holds `iroh_docs/docs.redb`; left to the router
+        // task, it is dropped only after that task notices the closed
+        // endpoint, so a reopen of the same directory right after shutdown
+        // could still find the database open.
+        // Taken out first: the lock is not held while the handlers shut down.
+        let router = self.router.write().await.take();
+        if let Some(router) = router {
+            if let Err(e) = router.shutdown().await {
+                warn!("Router shutdown failed: {}", e);
+            }
+        } else {
+            // No router: a start that failed after Docs or Gossip were spawned
+            // but before the router took them over. Their actors are shut down
+            // here, as the router would have — the docs engine holds
+            // `iroh_docs/docs.redb`.
+            let docs = self.docs.write().await.take();
+            if let Some(docs) = docs {
+                // `Docs` keeps its engine private; its handler shutdown awaits
+                // `Engine::shutdown` and logs a failure itself (iroh-docs 0.101).
+                iroh::protocol::ProtocolHandler::shutdown(&docs).await;
+            }
+            let gossip = self.gossip.write().await.take();
+            if let Some(gossip) = gossip {
+                if let Err(e) = gossip.shutdown().await {
+                    warn!("Gossip shutdown failed: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Shuts the blob store down and waits for its database to close.
+    /// Dropping an FsStore closes the database in the background
+    /// (iroh-blobs #252/#260 fix), so only this awaited call guarantees a
+    /// reopen of the same directory succeeds after it returns.
+    async fn close_store(&self) {
+        if let Ok(store) = self.get_store_for_blobs().await {
+            if let Err(e) = store.read().await.shutdown().await {
+                warn!("Blob store shutdown failed: {}", e);
+            }
+        }
     }
 
     /// Returns a reference to the store if available.
