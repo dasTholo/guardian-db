@@ -999,10 +999,10 @@ impl IrohBackend {
                 iroh::protocol::ProtocolHandler::shutdown(&docs).await;
             }
             let gossip = self.gossip.write().await.take();
-            if let Some(gossip) = gossip {
-                if let Err(e) = gossip.shutdown().await {
-                    warn!("Gossip shutdown failed: {}", e);
-                }
+            if let Some(gossip) = gossip
+                && let Err(e) = gossip.shutdown().await
+            {
+                warn!("Gossip shutdown failed: {}", e);
             }
         }
     }
@@ -1012,10 +1012,10 @@ impl IrohBackend {
     /// (iroh-blobs #252/#260 fix), so only this awaited call guarantees a
     /// reopen of the same directory succeeds after it returns.
     async fn close_store(&self) {
-        if let Ok(store) = self.get_store_for_blobs().await {
-            if let Err(e) = store.read().await.shutdown().await {
-                warn!("Blob store shutdown failed: {}", e);
-            }
+        if let Ok(store) = self.get_store_for_blobs().await
+            && let Err(e) = store.read().await.shutdown().await
+        {
+            warn!("Blob store shutdown failed: {}", e);
         }
     }
 
