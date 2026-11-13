@@ -298,29 +298,69 @@ mod publication_tests {
         info!("✓ Mensagem vazia publicada com sucesso");
     }
 
+    /// Both sides of the broadcast limit: since iroh-gossip 0.102 `broadcast`
+    /// refuses content above `max_content_size` with `ApiError::TooLarge`
+    /// before it sends (n0-computer/iroh-gossip PR #187, noosphere `IR` §3.3);
+    /// under 0.101 such a message was accepted and never sent. Content of
+    /// exactly `max_content_size` publishes, the old 1 MiB payload is refused.
     #[tokio::test]
     async fn test_publish_large_message() {
         tracing_subscriber::fmt().with_test_writer().try_init().ok();
 
         info!("Testando publicação de mensagem grande");
 
-        let (pubsub, _temp_dir) = create_test_pubsub("pub_large_test").await.unwrap();
+        let (backend, _temp_dir) = create_test_backend("pub_large_test").await.unwrap();
+
+        // The limit as gossip's own API states it for this node's
+        // `max_message_size` (`GossipTopic::max_content_size`, iroh-gossip
+        // 0.102 `api.rs:364`); the topic is only asked and dropped again.
+        let gossip = backend
+            .get_gossip()
+            .await
+            .unwrap()
+            .read()
+            .await
+            .clone()
+            .expect("gossip initialized");
+        let max_content = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([0x87; 32]), vec![])
+            .await
+            .unwrap()
+            .max_content_size();
+
+        let pubsub = EpidemicPubSub::new(backend).await.unwrap();
 
         let topic_name = "large-topic";
         let _topic = pubsub.topic_subscribe(topic_name).await.unwrap();
 
         sleep(Duration::from_millis(100)).await;
 
-        // Mensagem de 1MB
-        let large_message = vec![0xAB; 1024 * 1024];
-
-        let result = pubsub.publish_to_topic(topic_name, &large_message).await;
+        let at_limit = vec![0xAB; max_content];
+        let result = pubsub.publish_to_topic(topic_name, &at_limit).await;
         assert!(
             result.is_ok(),
-            "Publicação de mensagem grande deveria ter sucesso"
+            "content of exactly max_content_size ({max_content} bytes) must publish: {result:?}"
         );
 
-        info!("✓ Mensagem grande (1MB) publicada com sucesso");
+        // The old payload, 1 MiB, over the limit of the default 1 MiB
+        // `max_message_size`. guardian-db wraps the gossip error into a
+        // string, so the check is on `ApiError::TooLarge`'s message.
+        let large_message = vec![0xAB; 1024 * 1024];
+        let err = pubsub
+            .publish_to_topic(topic_name, &large_message)
+            .await
+            .expect_err("1 MiB is over max_content_size and must be refused");
+        let too_large = format!(
+            "message of {} bytes is over the limit of {} bytes",
+            large_message.len(),
+            max_content
+        );
+        assert!(
+            err.to_string().contains(&too_large),
+            "the refusal must carry ApiError::TooLarge ({too_large}): {err}"
+        );
+
+        info!("✓ Limite de max_content_size validado nos dois lados");
     }
 
     #[tokio::test]

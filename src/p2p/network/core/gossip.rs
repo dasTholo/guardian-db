@@ -312,6 +312,10 @@ impl EpidemicPubSub {
                     Ok(iroh_gossip::api::Event::Lagged) => {
                         warn!("Event loop lagging on topic {}", topic_name_clone);
                     }
+                    // `Event` is `#[non_exhaustive]` since iroh-gossip 0.102 (PR #198).
+                    Ok(other) => {
+                        debug!("Unknown event on topic {}: {:?}", topic_name_clone, other);
+                    }
                     Err(e) => {
                         error!("Error in event stream of topic {}: {}", topic_name_clone, e);
                         break;

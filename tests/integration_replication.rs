@@ -1098,3 +1098,25 @@ async fn test_store_isolation_across_nodes() {
 
     tracing::info!("✓ Store isolation across connected nodes validated");
 }
+
+/// `IrohClient::connect_gossip` under iroh-gossip 0.102 (noosphere `IR` §3.3
+/// item 3): `Gossip::handle_connection` takes only an ACCEPTED, server-side
+/// connection (n0-computer/iroh-gossip PR #185), so the call no longer dials.
+/// It records the peer (`note_known_peer`) and returns; the join with that
+/// peer is `GuardianDB::connect_to_peer`'s second step, and gossip dials by
+/// itself. A peer no address lookup knows makes a dial fail or hang; the new
+/// call returns `Ok` at once.
+#[tokio::test]
+async fn connect_gossip_records_a_peer_without_dialing_it() {
+    let node = TestNode::new("connect_gossip_records").await.expect("node");
+    let stranger = iroh::SecretKey::from_bytes(&[7; 32]).public();
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        node.iroh.connect_gossip(stranger),
+    )
+    .await;
+    assert!(
+        matches!(res, Ok(Ok(()))),
+        "connect_gossip must record the peer and return without a dial: {res:?}"
+    );
+}

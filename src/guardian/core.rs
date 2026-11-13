@@ -704,20 +704,11 @@ impl GuardianDB {
     pub async fn connect_to_peer(&self, peer_id: NodeId) -> Result<()> {
         tracing::info!(peer = %peer_id, "Establishing connection with peer");
 
-        // STEP 1: Establish a QUIC connection via the gossip ALPN.
-        // CRITICAL: Iroh gossip requires peers to be connected via QUIC
-        // with the ALPN "/iroh-gossip/1" BEFORE forming the mesh.
-        tracing::debug!(peer = %peer_id, "Establishing QUIC connection via gossip ALPN");
-
+        // STEP 1: record the peer (`connect_gossip`, noosphere `IR` §3.3). It
+        // dials nothing; gossip dials the peer itself when STEP 2 joins it to a
+        // store's topic.
         if let Err(e) = self.client.connect_gossip(peer_id).await {
-            tracing::warn!(
-                peer = %peer_id,
-                error = %e,
-                "Failed to establish gossip QUIC connection, but continuing anyway (peer may already be connected)"
-            );
-            // Do not return an error - the peer may already be connected or have another path.
-        } else {
-            tracing::info!(peer = %peer_id, "✓ Gossip QUIC connection established");
+            tracing::warn!(peer = %peer_id, error = %e, "Failed to record the peer");
         }
 
         // STEP 2: Find active stores to start synchronization.
