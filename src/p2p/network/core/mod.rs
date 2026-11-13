@@ -796,9 +796,6 @@ impl IrohBackend {
             downloader,
             iroh_docs::engine::DefaultAuthorStorage::Persistent(docs_dir.join("default-author")),
             None,
-            // The after-sync incomplete-blob scan interval (n0-computer/iroh-docs
-            // PR #88); `None` keeps the builder's default debounce, as above.
-            None,
         )
         .await
         .map_err(|e| GuardianError::Other(format!("Error initializing Docs: {}", e)))?;
