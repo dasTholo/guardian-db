@@ -1580,10 +1580,10 @@ fn db_err(e: impl std::fmt::Display) -> AdminError {
 
 /// Parse a hex/base32 blob hash string into an iroh-blobs `Hash`.
 ///
-/// `iroh_blobs 0.103`'s `Hash::from_str` decodes into a fixed 32-byte buffer and
-/// **panics** (instead of erroring) on any input length that isn't 64 (hex) or 52
-/// (base32-of-32-bytes). Guard the length up front so malformed input from a
-/// client/cursor surfaces as a clean `AdminError` rather than aborting the task.
+/// `iroh_blobs` 0.103's `Hash::from_str` decoded into a fixed 32-byte buffer and
+/// **panicked** on any input length that isn't 64 (hex) or 52 (base32-of-32-bytes);
+/// since 0.104 it returns `DecodeInvalidLength` (noosphere `IR` §2). The guard stays:
+/// it names the two accepted lengths in a clean `AdminError`.
 fn parse_blob_hash(s: &str) -> AdminResult<iroh_blobs::Hash> {
     if s.len() != 64 && s.len() != 52 {
         return Err(AdminError::new(
