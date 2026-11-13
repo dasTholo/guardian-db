@@ -304,9 +304,13 @@ impl IrohClient {
     ///
     /// It dials nothing: since iroh-gossip 0.102 `Gossip::handle_connection`
     /// takes only an accepted, server-side connection (n0-computer/iroh-gossip
-    /// PR #185) and closes a connection ten seconds after its last stream; gossip
-    /// dials a peer itself once a topic joins it, which is
-    /// `GuardianDB::connect_to_peer`'s second step (noosphere `IR` §3.3).
+    /// PR #185) and closes a connection ten seconds after its last stream.
+    /// Gossip dials the peer only where a topic joins it — in
+    /// `GuardianDB::connect_to_peer` that is the EventLog branch alone
+    /// (`get_or_create_topic_with_peers`); a KeyValue or Document store returns
+    /// there with no network contact (noosphere `IR` §3.3).
+    ///
+    /// It cannot fail today; the `Result` stays because this is public API.
     pub async fn connect_gossip(&self, node_id: NodeId) -> Result<()> {
         self.backend.note_known_peer(node_id).await;
         Ok(())

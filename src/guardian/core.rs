@@ -705,8 +705,14 @@ impl GuardianDB {
         tracing::info!(peer = %peer_id, "Establishing connection with peer");
 
         // STEP 1: record the peer (`connect_gossip`, noosphere `IR` §3.3). It
-        // dials nothing; gossip dials the peer itself when STEP 2 joins it to a
-        // store's topic.
+        // dials nothing. A dial follows only if STEP 2 meets an EventLog store,
+        // whose topic joins the peer; a KeyValue or Document store returns with
+        // no network contact.
+        //
+        // `connect_gossip` cannot fail today, so the warning below is not
+        // reached. It stays instead of `?` or a discarded result: the method is
+        // public API returning `Result`, and should it fail one day, a peer
+        // that could not be recorded must be logged without ending the sync.
         if let Err(e) = self.client.connect_gossip(peer_id).await {
             tracing::warn!(peer = %peer_id, error = %e, "Failed to record the peer");
         }
