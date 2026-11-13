@@ -388,10 +388,10 @@ members = [
 resolver = "2"
 
 # This fork runs only as noosphere's submodule (`vendor/guardian-db`), next to
-# noosphere's patched `vendor/iroh-docs`. The patch makes the fork's standalone
-# gate measure that same iroh-docs instead of crates.io 0.101.0, which still
-# pulls iroh-blobs 0.103.1 and so a second, incompatible `Hash` type
-# (noosphere `KB` §12). Inside noosphere's workspace cargo ignores this
-# section; noosphere's root `[patch.crates-io]` applies there.
+# noosphere's own iroh-docs fork `vendor/iroh-docs` (noosphere `IR` §1.2). The
+# patch makes the fork's standalone gate measure that same iroh-docs instead of
+# crates.io 0.101.0, which still pulls iroh-blobs 0.103.1 and so a second,
+# incompatible `Hash` type (noosphere `KB` §12). Inside noosphere's workspace
+# cargo ignores this section; noosphere's root `[patch.crates-io]` applies there.
 [patch.crates-io]
 iroh-docs = { path = "../iroh-docs" }
