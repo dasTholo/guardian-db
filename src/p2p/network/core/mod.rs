@@ -609,18 +609,20 @@ impl IrohBackend {
         // callback is the slot's forwarder: until the caller fills the slot every
         // run aborts, and iroh-docs' stock handler is NOT used (`Engine::spawn`
         // below gets `None`) — it would pin every entry of every replica.
-        let fs_store = match &self.config.gc {
-            None => FsStore::load(&store_dir).await,
-            Some(setup) => {
-                let mut options = iroh_blobs::store::fs::options::Options::new(&store_dir);
-                options.gc = Some(iroh_blobs::store::GcConfig {
-                    interval: setup.interval,
-                    add_protected: Some(setup.protect.as_cb()),
-                });
-                FsStore::load_with_opts(store_dir.join("blobs.db"), options).await
-            }
+        // `PowerLoss` syncs data files and the directory before the metadata that
+        // depends on them, so a blob stays durable before the entry naming it also
+        // across an OS crash (`IS` §3.3).
+        let mut options = iroh_blobs::store::fs::options::Options::new(&store_dir);
+        options.crash_consistency = iroh_blobs::store::fs::options::CrashConsistency::PowerLoss;
+        if let Some(setup) = &self.config.gc {
+            options.gc = Some(iroh_blobs::store::GcConfig {
+                interval: setup.interval,
+                add_protected: Some(setup.protect.as_cb()),
+            });
         }
-        .map_err(|e| GuardianError::Other(format!("Error initializing FsStore: {}", e)))?;
+        let fs_store = FsStore::load_with_opts(store_dir.join("blobs.db"), options)
+            .await
+            .map_err(|e| GuardianError::Other(format!("Error initializing FsStore: {}", e)))?;
 
         // Store the store.
         {
