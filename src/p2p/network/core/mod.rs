@@ -610,8 +610,9 @@ impl IrohBackend {
         // run aborts, and iroh-docs' stock handler is NOT used (`Engine::spawn`
         // below gets `None`) — it would pin every entry of every replica.
         // `PowerLoss` syncs data files and the directory before the metadata that
-        // depends on them, so a blob stays durable before the entry naming it also
-        // across an OS crash (`IS` §3.3).
+        // depends on them; together with the `sync_db` every caller runs before it
+        // writes an entry, a blob is durable before the entry naming it also across
+        // an OS crash (`IS` §3.3).
         let mut options = iroh_blobs::store::fs::options::Options::new(&store_dir);
         options.crash_consistency = iroh_blobs::store::fs::options::CrashConsistency::PowerLoss;
         if let Some(setup) = &self.config.gc {
