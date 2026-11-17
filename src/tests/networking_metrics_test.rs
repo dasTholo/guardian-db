@@ -10,7 +10,7 @@
 /// - Limites de amostras e performance
 use crate::p2p::network::core::networking_metrics::NetworkingMetricsCollector;
 use iroh::EndpointId as NodeId;
-use iroh_gossip::proto::TopicId;
+use iroh_gossip::TopicId;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;

@@ -21,7 +21,7 @@ use iroh::protocol::Router;
 use iroh::{EndpointAddr, TransportAddr};
 use iroh_blobs::BlobsProtocol;
 use iroh_blobs::store::fs::FsStore;
-use iroh_gossip::net::Gossip;
+use iroh_gossip::Gossip;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 

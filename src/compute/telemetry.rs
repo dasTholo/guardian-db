@@ -18,9 +18,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use iroh::EndpointId as NodeId;
-use iroh_gossip::api::GossipSender;
-use iroh_gossip::net::Gossip;
-use iroh_gossip::proto::TopicId;
+use iroh_gossip::Gossip;
+use iroh_gossip::GossipSender;
+use iroh_gossip::TopicId;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
@@ -216,7 +216,7 @@ impl CapabilityGossip {
             tokio::spawn(async move {
                 while let Some(event) = events.next().await {
                     match event {
-                        Ok(iroh_gossip::api::Event::Received(msg)) => {
+                        Ok(iroh_gossip::Event::Received(msg)) => {
                             match postcard::from_bytes::<CapabilityVector>(&msg.content) {
                                 Ok(vector) if vector.node_id != local => {
                                     debug!(peer = %vector.node_id.fmt_short(),
@@ -230,7 +230,7 @@ impl CapabilityGossip {
                                 }
                             }
                         }
-                        Ok(iroh_gossip::api::Event::NeighborDown(peer)) => {
+                        Ok(iroh_gossip::Event::NeighborDown(peer)) => {
                             // A vanished neighbor's vector is stale by definition.
                             directory.remove(&peer);
                         }

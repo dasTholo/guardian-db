@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use iroh::EndpointId as NodeId;
-use iroh_gossip::api::GossipSender;
-use iroh_gossip::net::Gossip;
-use iroh_gossip::proto::TopicId;
+use iroh_gossip::Gossip;
+use iroh_gossip::GossipSender;
+use iroh_gossip::TopicId;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -265,7 +265,7 @@ impl EpidemicPubSub {
         let event_task = tokio::spawn(async move {
             while let Some(event_result) = gossip_receiver.next().await {
                 match event_result {
-                    Ok(iroh_gossip::api::Event::Received(msg)) => {
+                    Ok(iroh_gossip::Event::Received(msg)) => {
                         debug!(
                             "Message received on topic {}: {} bytes",
                             topic_name_clone,
@@ -278,7 +278,7 @@ impl EpidemicPubSub {
                             );
                         }
                     }
-                    Ok(iroh_gossip::api::Event::NeighborUp(node_id)) => {
+                    Ok(iroh_gossip::Event::NeighborUp(node_id)) => {
                         debug!("Peer {} connected to topic {}", node_id, topic_name_clone);
                         let mut peers_lock = peers_clone.write().await;
                         if !peers_lock.contains(&node_id) {
@@ -293,7 +293,7 @@ impl EpidemicPubSub {
                             });
                         let _ = peer_events_sender_event_clone.send(event);
                     }
-                    Ok(iroh_gossip::api::Event::NeighborDown(node_id)) => {
+                    Ok(iroh_gossip::Event::NeighborDown(node_id)) => {
                         debug!(
                             "Peer {} disconnected from topic {}",
                             node_id, topic_name_clone
@@ -309,7 +309,7 @@ impl EpidemicPubSub {
                             });
                         let _ = peer_events_sender_event_clone.send(event);
                     }
-                    Ok(iroh_gossip::api::Event::Lagged) => {
+                    Ok(iroh_gossip::Event::Lagged) => {
                         warn!("Event loop lagging on topic {}", topic_name_clone);
                     }
                     // `Event` is `#[non_exhaustive]` since iroh-gossip 0.102 (PR #198).

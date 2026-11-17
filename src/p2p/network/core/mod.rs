@@ -20,7 +20,7 @@ use iroh_blobs::api::Tag;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobFormat, BlobsProtocol, Hash as IrohHash, HashAndFormat};
 use iroh_docs::protocol::Docs;
-use iroh_gossip::net::Gossip;
+use iroh_gossip::Gossip;
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};

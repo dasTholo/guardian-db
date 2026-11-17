@@ -5,7 +5,7 @@
 
 use crate::guardian::error::{GuardianError, Result};
 use iroh::EndpointId as NodeId;
-use iroh_gossip::proto::TopicId;
+use iroh_gossip::TopicId;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,

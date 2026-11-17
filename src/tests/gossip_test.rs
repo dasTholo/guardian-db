@@ -299,7 +299,7 @@ mod publication_tests {
     }
 
     /// Both sides of the broadcast limit: since iroh-gossip 0.102 `broadcast`
-    /// refuses content above `max_content_size` with `ApiError::TooLarge`
+    /// refuses content above `max_content_size` with `Error::TooLarge`
     /// before it sends (n0-computer/iroh-gossip PR #187, noosphere `IR` §3.3);
     /// under 0.101 such a message was accepted and never sent. Content of
     /// exactly `max_content_size` publishes, the old 1 MiB payload is refused.
@@ -313,7 +313,7 @@ mod publication_tests {
 
         // The limit as gossip's own API states it for this node's
         // `max_message_size` (`GossipTopic::max_content_size`, iroh-gossip
-        // 0.102 `api.rs:364`); the topic is only asked and dropped again.
+        // 0.103 `src/api.rs:159`); the topic is only asked and dropped again.
         let gossip = backend
             .get_gossip()
             .await
@@ -323,7 +323,7 @@ mod publication_tests {
             .clone()
             .expect("gossip initialized");
         let max_content = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([0x87; 32]), vec![])
+            .subscribe(iroh_gossip::TopicId::from_bytes([0x87; 32]), vec![])
             .await
             .unwrap()
             .max_content_size();
@@ -344,7 +344,7 @@ mod publication_tests {
 
         // The old payload, 1 MiB, over the limit of the default 1 MiB
         // `max_message_size`. guardian-db wraps the gossip error into a
-        // string, so the check is on `ApiError::TooLarge`'s message.
+        // string, so the check is on `Error::TooLarge`'s message.
         let large_message = vec![0xAB; 1024 * 1024];
         let err = pubsub
             .publish_to_topic(topic_name, &large_message)
@@ -357,7 +357,7 @@ mod publication_tests {
         );
         assert!(
             err.to_string().contains(&too_large),
-            "the refusal must carry ApiError::TooLarge ({too_large}): {err}"
+            "the refusal must carry Error::TooLarge ({too_large}): {err}"
         );
 
         info!("✓ Limite de max_content_size validado nos dois lados");
