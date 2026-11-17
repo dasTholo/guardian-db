@@ -299,7 +299,8 @@ mod publication_tests {
     }
 
     /// Both sides of the broadcast limit: since iroh-gossip 0.102 `broadcast`
-    /// refuses content above `max_content_size` with `Error::TooLarge`
+    /// refuses content above `max_content_size` with `ApiError::TooLarge` in
+    /// 0.102, `Error::TooLarge` since 0.103,
     /// before it sends (n0-computer/iroh-gossip PR #187, noosphere `IR` §3.3);
     /// under 0.101 such a message was accepted and never sent. Content of
     /// exactly `max_content_size` publishes, the old 1 MiB payload is refused.

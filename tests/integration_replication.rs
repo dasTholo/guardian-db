@@ -1099,7 +1099,8 @@ async fn test_store_isolation_across_nodes() {
     tracing::info!("✓ Store isolation across connected nodes validated");
 }
 
-/// `IrohClient::connect_gossip` under iroh-gossip 0.102 (noosphere `IR` §3.3
+/// `IrohClient::connect_gossip` under iroh-gossip 0.102, unchanged in 0.103
+/// (noosphere `VSP` §12, Task 8; noosphere `IR` §3.3
 /// item 3): `Gossip::handle_connection` takes only an ACCEPTED, server-side
 /// connection (n0-computer/iroh-gossip PR #185), so the call no longer dials.
 /// It records the peer (`note_known_peer`) and returns; the join with that
